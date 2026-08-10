@@ -1,0 +1,18 @@
+keras-tinygrad
+Copyright 2026 the keras-tinygrad authors
+
+This product includes software derived from Keras
+(https://github.com/keras-team/keras),
+Copyright 2015-present, the Keras authors and Google LLC,
+licensed under the Apache License, Version 2.0.
+
+In particular, the vendored backend sources under
+src/keras_tinygrad/_backend/ are derived from the Keras project; several
+modules are ports of the implementations in Keras's numpy backend
+(keras/src/backend/numpy/).
+
+This product is designed to work with tinygrad
+(https://github.com/tinygrad/tinygrad), Copyright the tiny corp,
+distributed under the MIT License. No tinygrad source code is included
+in this distribution; the tinygrad name is used only to describe
+interoperability.

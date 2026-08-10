@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Install clang (tinygrad CPU backend compiler)
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - name: Lint + format + loader tests
+        run: make verify
+      - name: Executable tutorial (every TUTORIAL.md block runs)
+        run: make tutorial
+      - name: MLP smoke test
+        run: make smoke
+      - name: Loader anchors match installed keras
+        run: make vendor-check
+      - name: Byte-compile vendored backend sources
+        run: uv run python -m py_compile src/keras_tinygrad/_backend/*.py

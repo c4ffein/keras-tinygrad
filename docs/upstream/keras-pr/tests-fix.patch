@@ -1,0 +1,95 @@
+diff --git a/keras/src/layers/core/dense_test.py b/keras/src/layers/core/dense_test.py
+index 634bacc..a348f9c 100644
+--- a/keras/src/layers/core/dense_test.py
++++ b/keras/src/layers/core/dense_test.py
+@@ -701,6 +701,11 @@ class DenseTest(testing.TestCase):
+     @pytest.mark.skipif(
+         testing.tensorflow_uses_gpu(), reason="Segfault on Tensorflow GPU"
+     )
++    @pytest.mark.skipif(
++        backend.backend() not in ("tensorflow", "jax", "torch"),
++        reason="`train_one_step` is only implemented for the tensorflow, "
++        "jax and torch backends",
++    )
+     def test_quantize_float8(self):
+         import ml_dtypes
+ 
+diff --git a/keras/src/layers/core/einsum_dense_test.py b/keras/src/layers/core/einsum_dense_test.py
+index 6318146..79a1dad 100644
+--- a/keras/src/layers/core/einsum_dense_test.py
++++ b/keras/src/layers/core/einsum_dense_test.py
+@@ -949,6 +949,11 @@ class EinsumDenseTest(testing.TestCase):
+             )
+ 
+     @pytest.mark.requires_trainable_backend
++    @pytest.mark.skipif(
++        backend.backend() not in ("tensorflow", "jax", "torch"),
++        reason="`train_one_step` is only implemented for the tensorflow, "
++        "jax and torch backends",
++    )
+     def test_quantize_float8(self):
+         import ml_dtypes
+ 
+diff --git a/keras/src/ops/numpy_test.py b/keras/src/ops/numpy_test.py
+index 3826426..1a49e98 100644
+--- a/keras/src/ops/numpy_test.py
++++ b/keras/src/ops/numpy_test.py
+@@ -3713,21 +3713,37 @@ class NumpyTwoInputOpsCorrectnessTest(testing.TestCase):
+         y1 = np.ones([2, 1, 4, 3])
+         y2 = np.ones([1, 5, 4, 3])
+         y3 = np.ones([1, 5, 4, 2])
++
++        def np_cross(a, b):
++            # `np.cross` removed support for 2-dimensional vectors in
++            # numpy 2.5 (deprecated in 2.0), but `keras.ops.cross` still
++            # supports them. Emulate the numpy < 2.5 reference behavior.
++            if a.shape[-1] == 2 and b.shape[-1] == 2:
++                return a[..., 0] * b[..., 1] - a[..., 1] * b[..., 0]
++
++            def pad3(v):
++                if v.shape[-1] == 2:
++                    zeros = np.zeros(v.shape[:-1] + (1,), dtype=v.dtype)
++                    v = np.concatenate([v, zeros], axis=-1)
++                return v
++
++            return np.cross(pad3(a), pad3(b))
++
+         self.assertAllClose(knp.cross(x1, y1), np.cross(x1, y1))
+         self.assertAllClose(knp.cross(x1, y2), np.cross(x1, y2))
+         if backend.backend() != "torch":
+             # API divergence between `torch.cross` and `np.cross`
+             # `torch.cross` only allows dim 3, `np.cross` allows dim 2 or 3
+-            self.assertAllClose(knp.cross(x1, y3), np.cross(x1, y3))
+-            self.assertAllClose(knp.cross(x2, y3), np.cross(x2, y3))
++            self.assertAllClose(knp.cross(x1, y3), np_cross(x1, y3))
++            self.assertAllClose(knp.cross(x2, y3), np_cross(x2, y3))
+ 
+         self.assertAllClose(knp.Cross()(x1, y1), np.cross(x1, y1))
+         self.assertAllClose(knp.Cross()(x1, y2), np.cross(x1, y2))
+         if backend.backend() != "torch":
+             # API divergence between `torch.cross` and `np.cross`
+             # `torch.cross` only allows dim 3, `np.cross` allows dim 2 or 3
+-            self.assertAllClose(knp.Cross()(x1, y3), np.cross(x1, y3))
+-            self.assertAllClose(knp.Cross()(x2, y3), np.cross(x2, y3))
++            self.assertAllClose(knp.Cross()(x1, y3), np_cross(x1, y3))
++            self.assertAllClose(knp.Cross()(x2, y3), np_cross(x2, y3))
+ 
+         # Test axis is not None
+         self.assertAllClose(
+diff --git a/keras/src/trainers/trainer_test.py b/keras/src/trainers/trainer_test.py
+index ec04d53..0896bbf 100644
+--- a/keras/src/trainers/trainer_test.py
++++ b/keras/src/trainers/trainer_test.py
+@@ -40,7 +40,11 @@ elif backend.backend() == "numpy":
+ elif backend.backend() == "openvino":
+     from keras.src.backend.openvino.trainer import OpenVINOTrainer as Trainer
+ else:
+-    raise ImportError(f"Invalid backend: {backend.backend()}")
++    # Reuse the Trainer class that `keras.src.models.model` already resolved
++    # for the current backend instead of duplicating the dispatch here. Any
++    # backend that can build a `Model` can run this file; truly unknown
++    # backends still fail loudly, in `keras.src.models.model`.
++    from keras.src.models.model import Trainer
+ 
+ 
+ # A model is just a layer mixed in with a Trainer.

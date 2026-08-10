@@ -1,0 +1,64 @@
+[build-system]
+# >=77: first setuptools release accepting the PEP 639 SPDX `license` string
+# below (68-76 fail the build on it).
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "keras-tinygrad"
+version = "0.1.0"
+description = "Out-of-tree tinygrad backend for stock Keras 3 (KERAS_BACKEND=tinygrad)"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+dependencies = [
+    "keras>=3.15,<3.16",
+    # Upper-bounded like keras: the trainer's JIT safety story is built on
+    # 0.13 internals (JitError-on-capture semantics, loss.gradient API);
+    # tinygrad is pre-1.0 and breaks APIs freely, and a semantic change
+    # would surface at runtime, not import. Bump only with a referee re-run.
+    "tinygrad>=0.13,<0.14",
+    "numpy",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+keras_tinygrad = ["_backend/*.py"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.8",
+    # keras' numpy backend imports scipy (linalg) and jax (it borrows jax's
+    # fft); the loader tests exercise that backend in the
+    # explicit-KERAS_BACKEND scenarios, so tests need both.
+    "scipy",
+    "jax",
+]
+
+[tool.ruff]
+line-length = 120
+# The vendored backend is a byte-identical snapshot of the keras clone
+# (sync_vendor.py --check enforces it); lint/format must never touch it.
+extend-exclude = ["src/keras_tinygrad/_backend"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+[tool.ruff.lint.isort]
+# Import order is load-bearing: `import keras_tinygrad` must precede
+# `import keras` everywhere (it installs the import hook). A dedicated
+# section between stdlib and third-party makes the sorter ENFORCE that
+# order instead of alphabetizing keras before keras_tinygrad.
+section-order = [
+    "future",
+    "standard-library",
+    "keras-hook",
+    "third-party",
+    "first-party",
+    "local-folder",
+]
+
+[tool.ruff.lint.isort.sections]
+"keras-hook" = ["keras_tinygrad"]
