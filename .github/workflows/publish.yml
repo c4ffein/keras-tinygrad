@@ -1,0 +1,65 @@
+# Publish to PyPI via Trusted Publishing (OIDC) — no API tokens anywhere.
+#
+# One-time setup this workflow assumes:
+#   1. PyPI: account -> Publishing -> "Add a new pending publisher":
+#      project `keras-tinygrad`, owner `c4ffein`, repo `keras-tinygrad`,
+#      workflow `publish.yml`, environment `pypi`. (The name is claimed at
+#      the first successful publish.)
+#   2. GitHub: repo Settings -> Environments -> create `pypi`
+#      (optionally: required reviewers = you, for a manual approval gate).
+#
+# Release flow: bump `version` in pyproject.toml -> create a GitHub
+# Release with tag `v<version>` -> this workflow verifies, builds,
+# smoke-tests the built wheel, and publishes. PyPI versions are
+# immutable: a broken release means a patch bump, never a re-upload.
+
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  verify-and-build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+      - name: Install clang (tinygrad CPU backend compiler)
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - name: Tag must match pyproject version
+        run: |
+          v=$(uv run python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          test "v$v" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} != pyproject version v$v"; exit 1; }
+      - name: Lint + format + loader tests
+        run: make verify
+      - name: Executable tutorial
+        run: make tutorial
+      - name: Loader anchors match installed keras
+        run: make vendor-check
+      - name: Build sdist + wheel
+        run: uv build
+      - name: Smoke-test the BUILT WHEEL (the shipped artifact, not the checkout)
+        run: |
+          uv venv /tmp/wheel-venv
+          uv pip install --python /tmp/wheel-venv/bin/python dist/*.whl
+          /tmp/wheel-venv/bin/python examples/mlp_smoke.py
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: verify-and-build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # the whole trusted-publishing mechanism
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@v1.14.2
