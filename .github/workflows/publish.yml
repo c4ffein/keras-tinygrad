@@ -8,16 +8,18 @@
 #   2. GitHub: repo Settings -> Environments -> create `pypi`
 #      (optionally: required reviewers = you, for a manual approval gate).
 #
-# Release flow: bump `version` in pyproject.toml -> create a GitHub
-# Release with tag `v<version>` -> this workflow verifies, builds,
-# smoke-tests the built wheel, and publishes. PyPI versions are
-# immutable: a broken release means a patch bump, never a re-upload.
+# Release flow: bump `version` in pyproject.toml, then
+#     git tag v<version> && git push origin v<version>
+# This workflow verifies, builds, smoke-tests the built wheel, publishes
+# to PyPI, and then creates the GitHub Release (notes auto-generated,
+# dist files attached). PyPI versions are immutable: a broken release
+# means a patch bump, never a re-upload.
 
 name: Publish to PyPI
 
 on:
-  release:
-    types: [published]
+  push:
+    tags: ["v*"]
 
 jobs:
   verify-and-build:
@@ -63,3 +65,22 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@v1.14.2
+
+  github-release:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release + upload assets
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      - name: Create GitHub Release with dist assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "keras-tinygrad ${GITHUB_REF_NAME#v}" \
+            --generate-notes
