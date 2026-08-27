@@ -115,6 +115,15 @@ how-it-works.md for *how*):
    table).
 6. `keras.src.utils.backend_utils` — `DynamicBackend`'s per-backend branch.
 
+The six touchpoints have a second consumer besides the loader: the
+plugin-backends PoC (docs/upstream/keras-plugin-poc.md) formalizes them as
+an entry-point protocol (`keras.backends` group; standard names
+`trainer.Trainer` / `layer.Layer` / `export.ExportArchive` /
+`standardize_dtype_hook`, aliased in the backend sources). On a keras with
+native plugin support the packaged hook detects `backend/plugins.py` and
+stands down (`__init__.py`'s filesystem probe); on stock keras the entry
+point is inert and the hook patches as described below.
+
 **The rule:** these six ARE the contract between the backend and keras-core.
 Any change that adds a keras-core touchpoint must add the matching anchor to
 the package loader's patch table (`_loader.py`'s `_PATCHES`) in the same

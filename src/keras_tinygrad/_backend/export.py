@@ -8,3 +8,7 @@ class TinygradExportArchive:
         raise NotImplementedError(
             "`add_endpoint` is not implemented in the tinygrad backend."
         )
+
+
+# Plugin-protocol name (see keras.src.backend.plugins).
+ExportArchive = TinygradExportArchive

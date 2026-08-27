@@ -85,6 +85,18 @@ def to_keras_dtype(tg_dtype):
     return KERAS_DTYPES[tg_dtype]
 
 
+def standardize_dtype_hook(dtype):
+    """Plugin-protocol hook (see keras.src.backend.plugins): map tinygrad
+    DType objects to Keras dtype names inside keras-core's
+    `standardize_dtype`. tinygrad `DType.name` spellings ("float", "half",
+    ...) don't match the Keras names, so the generic name-based fallbacks
+    there would produce wrong strings. Returns None for non-tinygrad
+    values (declining lets the generic handling proceed)."""
+    if type(dtype).__module__.split(".")[0] == "tinygrad":
+        return to_keras_dtype(dtype)
+    return None
+
+
 # --- complex-lite interop ---------------------------------------------------
 # tinygrad has no complex dtypes. keras-core's `view_as_complex` /
 # `view_as_real` (implemented in keras/src/ops/math.py, not

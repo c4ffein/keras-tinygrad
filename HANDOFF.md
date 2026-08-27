@@ -159,6 +159,21 @@ loader patch-table anchor in the same change.
    test/predict paths still eager — the remaining smaller lever.
 8. Upstream float8 test branch (keras test files) — part of any upstream PR.
 
+## Plugin-backends PoC (2026-08-10) — WORKING
+
+`docs/upstream/keras-plugin-poc.md`. A keras fork (worktree
+`/home/dev/workspace/keras-plugin-fork`, branch `plugin-backends`, all
+uncommitted) adds `keras/src/backend/plugins.py` + generalizes the six
+dispatch `else:` tails to resolve the `keras.backends` entry-point group.
+Result: on the fork, plain `KERAS_BACKEND=tinygrad python -c "import
+keras"` loads this backend with ZERO patches and no hook (referee
+dense_test 70/1/1, identical to stock-path). The pip package now declares
+the entry point (inert on stock keras) and the hook stands down when it
+detects native plugin support; stock path re-verified green. This branch
+is the living demo for the eventual upstream design issue — sequencing in
+the PoC doc. NOTE: the zigcc shim now execs via
+`/home/dev/workspace/zig-venv` (old ktg-venv is gone).
+
 ## Decision queue (owner's, not yours)
 
 - Commits/checkpoints in the clone and this repo.
@@ -169,10 +184,18 @@ loader patch-table anchor in the same change.
   found 2026-08-03: Tensor slice bounds in `__getitem__` (blocks
   RandomCrop) and argfix's exact-class tuple/list check (worked around
   backend-side for TrackedList).
-- keras upstream: realistic path is a backend-plugin entry-point PR, not the
-  backend itself (see Chollet's criteria in keras#20793; confirmed by
-  keras#23193 — a complete MLX backend PR, 12k tests green, closed unmerged
-  on process friction). READY TO DROP: docs/upstream/keras-pr/ has
+- keras upstream — LANDSCAPE CHANGED 2026-08-21 (see
+  /home/dev/workspace/KERAS_COMMITS_AND_ORDER_GUIDE.md §0): the keras team
+  is building pluggable backends itself (PRs #23397/#23410 + branches;
+  official keras-team/keras-mlx and keras-team/keras-openvino plugin
+  repos; `keras_<name>` naming convention — ours already matches; master
+  landing rewound 2026-08-20, effort continues). The old plan (design
+  issue proposing entry points) is obsolete; new plan: engage as an
+  independent pilot plugin. Also: test_cross was fixed upstream (#23408
+  merged 2026-08-11, incl. the numpy-backend companion) — our PR-1a is
+  dead. Original reasoning kept for the record: (Chollet's criteria in
+  keras#20793; keras#23193, the closed MLX PR, has been reincarnated as
+  the pilot plugin of the official program). READY TO DROP: docs/upstream/keras-pr/ has
   tests-fix.patch (git-apply-clean, 4 files) + PR_BODY.md for the
   test-side bundle (test_cross numpy>=2.5 guard, float8 skipif,
   trainer_test fallback; ViewAsComplex skip deliberately dropped — we pass

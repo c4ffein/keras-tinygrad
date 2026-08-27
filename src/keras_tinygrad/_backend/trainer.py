@@ -803,3 +803,8 @@ class TinygradTrainer(base_trainer.Trainer):
             backend.convert_to_numpy, batch_outputs
         )
         return batch_outputs
+
+
+# Plugin-protocol name (see keras.src.backend.plugins): the generic
+# dispatch imports `trainer.Trainer`.
+Trainer = TinygradTrainer

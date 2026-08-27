@@ -3,6 +3,11 @@
 A [tinygrad](https://github.com/tinygrad/tinygrad) backend for stock Keras 3.
 No fork, no vendored Keras — `pip install` next to the PyPI wheel and train.
 
+*Community project — not affiliated with the Keras team or the tiny corp.*
+Also runs plugin-style on Keras' in-development
+[pluggable-backend branch](https://github.com/keras-team/keras/tree/pluggable_backend)
+with zero patches (see `docs/upstream/pluggable-branch-pilot.md`).
+
 ```python
 import keras_tinygrad  # must come first: installs the import hook
 

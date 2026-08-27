@@ -8,8 +8,22 @@ build-backend = "setuptools.build_meta"
 name = "keras-tinygrad"
 version = "0.1.0"
 description = "Out-of-tree tinygrad backend for stock Keras 3 (KERAS_BACKEND=tinygrad)"
+readme = "README.md"
+authors = [{ name = "c4ffein" }]
 license = "Apache-2.0"
 requires-python = ">=3.11"
+keywords = ["keras", "tinygrad", "backend", "deep-learning", "machine-learning"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
 dependencies = [
     "keras>=3.15,<3.16",
     # Upper-bounded like keras: the trainer's JIT safety story is built on
@@ -19,6 +33,18 @@ dependencies = [
     "tinygrad>=0.13,<0.14",
     "numpy",
 ]
+
+[project.urls]
+Repository = "https://github.com/c4ffein/keras-tinygrad"
+Issues = "https://github.com/c4ffein/keras-tinygrad/issues"
+
+# If the installed keras supports backend plugins natively (the
+# `keras.backends` entry-point group resolved by keras/src/backend/plugins.py
+# — today only the plugin-backends fork, hopefully upstream someday), keras
+# discovers the backend through this entry point and the import hook stands
+# down entirely (see __init__.py). On stock keras the entry point is inert.
+[project.entry-points."keras.backends"]
+tinygrad = "keras_tinygrad._backend"
 
 [tool.setuptools.packages.find]
 where = ["src"]

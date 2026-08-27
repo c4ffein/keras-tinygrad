@@ -20,6 +20,7 @@ from keras.src.backend.tinygrad.core import device_scope
 from keras.src.backend.tinygrad.core import is_tensor
 from keras.src.backend.tinygrad.core import random_seed_dtype
 from keras.src.backend.tinygrad.core import shape
+from keras.src.backend.tinygrad.core import standardize_dtype_hook
 from keras.src.backend.tinygrad.core import vectorized_map
 from keras.src.backend.tinygrad.rnn import bidirectional_gru
 from keras.src.backend.tinygrad.rnn import bidirectional_lstm

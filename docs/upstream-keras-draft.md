@@ -1,7 +1,17 @@
 # Upstream draft — keras-team/keras test-side fixes (NOT submitted)
 
 Status: local draft for the owner's review. Nothing has been submitted,
-no issue opened, nothing pushed. A ready-to-apply PR package (patch +
+no issue opened, nothing pushed.
+
+**UPDATE 2026-08-21:** item 1 (`test_cross`) is DONE upstream — keras PR
+#23408 (merged 2026-08-11) fixed the test AND the numpy backend's
+`cross`, i.e. both our patch and the held-in-reserve companion.
+Do not submit it. Items 2 and 4 (float8 skipif, trainer_test dispatch)
+remain unfixed on both master and the team's `pluggable_backend` branch
+(whose trainer_test still ends in `raise ImportError`) — retargeted per
+`/home/dev/workspace/KERAS_COMMITS_AND_ORDER_GUIDE.md` §1/§3: offer them
+during engagement with the pluggable-backend effort, targeting whichever
+tree the maintainers prefer. A ready-to-apply PR package (patch +
 neutral PR body) lives in `docs/upstream/keras-pr/` (`tests-fix.patch`,
 `PR_BODY.md`); this document is the keras-tinygrad-side rationale with
 full citations. All line numbers are against the reference clone at
