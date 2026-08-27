@@ -28,7 +28,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.0.1 # no floating v10 major tag exists
       - name: Install clang (tinygrad CPU backend compiler)
         run: sudo apt-get update && sudo apt-get install -y clang
       - name: Tag must match pyproject version

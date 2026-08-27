@@ -1,0 +1,107 @@
+# THE PYPI-SIDE CHECK (pattern borrowed from c4ffein/pyscotch): the literal
+# end-user journey, from the REAL index — `pip install keras-tinygrad`, no
+# repo checkout anywhere, every byte from PyPI — then train a model on the
+# tinygrad backend, and separately prove the patched keras still behaves as
+# stock keras when another backend is selected.
+#
+# Pre-publish twin, for orientation: publish.yml smoke-tests the wheel it
+# just BUILT; this workflow certifies the package PyPI actually SERVES.
+# Run manually after a release lands, giving the index a few minutes to
+# propagate.
+
+name: Verify published PyPI release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "keras-tinygrad version on PyPI (empty = latest)"
+        required: false
+        default: ""
+
+permissions: {}
+
+jobs:
+  tinygrad-journey:
+    name: Train on the tinygrad backend, from PyPI
+    runs-on: ubuntu-latest
+    steps:
+      # Deliberately NO actions/checkout: a user has none of this repo.
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install clang (tinygrad CPU backend compiler)
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - name: pip install keras-tinygrad from PyPI
+        run: |
+          spec="keras-tinygrad"
+          if [ -n "${{ inputs.version }}" ]; then spec="keras-tinygrad==${{ inputs.version }}"; fi
+          python -m pip install --upgrade pip
+          pip install "$spec"
+          pip show keras-tinygrad | head -2
+      - name: Import-hook journey — compile, fit, predict
+        working-directory: ${{ runner.temp }}
+        run: |
+          python - <<'PY'
+          import keras_tinygrad  # installs the import hook
+
+          import keras
+          import numpy as np
+
+          assert keras.config.backend() == "tinygrad", keras.config.backend()
+          x = np.random.default_rng(0).normal(size=(64, 8)).astype("float32")
+          y = x @ np.arange(8, dtype="float32")[:, None] + 1.0
+          model = keras.Sequential(
+              [
+                  keras.layers.Input((8,)),
+                  keras.layers.Dense(16, activation="relu"),
+                  keras.layers.Dense(1),
+              ]
+          )
+          model.compile(optimizer="adam", loss="mse")
+          h = model.fit(x, y, epochs=3, batch_size=16, verbose=0)
+          losses = h.history["loss"]
+          assert losses[-1] < losses[0], losses  # training moves the loss
+          out = model.predict(x[:2], verbose=0)
+          assert out.shape == (2, 1), out.shape
+          t = keras.ops.convert_to_tensor([1.0, 2.0])
+          assert type(t).__module__.startswith("tinygrad"), type(t)
+          assert keras.utils.standardize_dtype(t.dtype) == "float32"
+          print("from-PyPI tinygrad journey OK:", keras_tinygrad.__version__)
+          PY
+
+  stock-keras-unharmed:
+    name: Patched keras == stock keras on another backend
+    runs-on: ubuntu-latest
+    steps:
+      # Deliberately NO actions/checkout.
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: pip install keras-tinygrad + a non-tinygrad backend's deps
+        run: |
+          spec="keras-tinygrad"
+          if [ -n "${{ inputs.version }}" ]; then spec="keras-tinygrad==${{ inputs.version }}"; fi
+          python -m pip install --upgrade pip
+          # keras' numpy backend borrows scipy (linalg) and jax (fft).
+          pip install "$spec" scipy "jax[cpu]"
+      - name: Explicit KERAS_BACKEND wins; patched keras trains as stock
+        working-directory: ${{ runner.temp }}
+        env:
+          KERAS_BACKEND: numpy
+        run: |
+          python - <<'PY'
+          import keras_tinygrad  # hook installs, but explicit backend wins
+
+          import keras
+          import numpy as np
+
+          assert keras.config.backend() == "numpy", keras.config.backend()
+          x = np.ones((16, 4), dtype="float32")
+          model = keras.Sequential(
+              [keras.layers.Input((4,)), keras.layers.Dense(2)]
+          )
+          out = model.predict(x, verbose=0)
+          assert out.shape == (16, 2), out.shape
+          print("stock-keras-unharmed OK (numpy backend, patched keras)")
+          PY
