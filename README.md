@@ -1,12 +1,23 @@
 # keras-tinygrad
 
-A [tinygrad](https://github.com/tinygrad/tinygrad) backend for stock Keras 3.
-No fork, no vendored Keras — `pip install` next to the PyPI wheel and train.
+---
 
-*Community project — not affiliated with the Keras team or the tiny corp.*
+*WARNING — this is a vibe-engineering experiment - not affiliated with the Keras team or the tiny corp.*  
+It may still be useful to you, and will be updated as
+[the RFC for Keras backends as plugins](https://github.com/keras-team/keras/issues/23523) advances.
+
+---
+
+A [tinygrad](https://github.com/tinygrad/tinygrad) backend for stock Keras 3.
+No fork, no vendored Keras — installs next to the stock PyPI wheel:
+`pip install keras-tinygrad` / `uv pip install keras-tinygrad`.
+Every release is certified by a public workflow that installs the package
+**from PyPI** — no repo checkout — and trains with it:
+[pypi-verify](https://github.com/c4ffein/keras-tinygrad/actions/workflows/pypi-verify.yml).
+
 Also runs plugin-style on Keras' in-development
 [pluggable-backend branch](https://github.com/keras-team/keras/tree/pluggable_backend)
-with zero patches (see `docs/upstream/pluggable-branch-pilot.md`).
+with zero patches (see the [pilot report](https://github.com/c4ffein/keras-tinygrad/blob/main/docs/upstream/pluggable-branch-pilot.md)).
 
 ```python
 import keras_tinygrad  # must come first: installs the import hook
@@ -36,7 +47,7 @@ That is the whole API. Everything after the first line is literally just Keras.
 pip install keras-tinygrad
 ```
 
-New here? Start with **[TUTORIAL.md](TUTORIAL.md)** — every code block on
+New here? Start with **[TUTORIAL.md](https://github.com/c4ffein/keras-tinygrad/blob/main/TUTORIAL.md)** — every code block on
 that page is executed by CI, so it cannot rot.
 
 Works against the stock PyPI `keras` wheel (3.15.x — 3.15.0 verified by the
@@ -57,14 +68,15 @@ sources and surgically patches the six Keras modules that hardcode backend
 dispatch. Each patch is an exact-string anchor that must match **exactly
 once** — on an unsupported Keras version the import fails loudly with a
 version-mismatch error instead of guessing. Details in
-[docs/how-it-works.md](docs/how-it-works.md).
+[docs/how-it-works.md](https://github.com/c4ffein/keras-tinygrad/blob/main/docs/how-it-works.md).
 
 ## Status
 
 <!-- TALLY -->
 **Keras' own full layers test tree (preprocessing included): 1,989 passed /
-5 failed / 215 skipped (99.7%).** (Single run, python 3.12 + tensorflow
-installed for collection, 2026-08-03.) All 5 failures are individually
+5 failed / 215 skipped (99.7%).** (python 3.12 + tensorflow installed for
+collection; first run 2026-08-03, re-verified identical 2026-08-27 —
+same 5 failures, no regressions.) All 5 failures are individually
 documented: 2× upstream `test_quantize_float8` (test-side `train_one_step`
 only defined for tf/jax/torch — fix drafted in `docs/upstream/keras-pr/`),
 2× RandomCrop (tinygrad `__getitem__` lacks Tensor slice bounds — upstream
@@ -129,13 +141,13 @@ Honest list:
 
 - `keras.ops.unique` / `keras.ops.vectorize` (data-dependent output
   shapes — loud stubs pending a design decision; the rest of the numpy
-  tail landed, see [docs/ops-numpy-triage.md](docs/ops-numpy-triage.md)).
+  tail landed, see [docs/ops-numpy-triage.md](https://github.com/c4ffein/keras-tinygrad/blob/main/docs/ops-numpy-triage.md)).
 - Fused RNN kernels (recurrent layers take the generic scan path — correct,
   not fast; the TinyJit train step recovers most of the gap).
 - Sparse and ragged tensors.
 - TF-string preprocessing layers.
 - Complex arithmetic (interop works; see
-  [docs/complex-support.md](docs/complex-support.md)).
+  [docs/complex-support.md](https://github.com/c4ffein/keras-tinygrad/blob/main/docs/complex-support.md)).
 
 ## No clang? Use zig
 
@@ -150,9 +162,9 @@ The method is fixed: the numpy backend is the semantic reference, Keras' own
 tests are the referee, stubs stay loud. Dev loop: `uv sync`, then
 `make verify` (lint + format + loader tests) before review; `make tutorial`,
 `make smoke`, and `make fuzz` for the heavier checks. See
-[CONTRIBUTING.md](CONTRIBUTING.md).
+[CONTRIBUTING.md](https://github.com/c4ffein/keras-tinygrad/blob/main/CONTRIBUTING.md).
 
 ## License
 
 Backend sources subclass and patch Keras (Apache-2.0) and drive tinygrad
-(MIT). This package's own code: see [LICENSE](LICENSE).
+(MIT). This package's own code: see [LICENSE](https://github.com/c4ffein/keras-tinygrad/blob/main/LICENSE).

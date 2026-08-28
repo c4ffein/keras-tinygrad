@@ -21,5 +21,7 @@ jobs:
         run: make smoke
       - name: Loader anchors match installed keras
         run: make vendor-check
+      - name: README numbers internally consistent
+        run: make readme-check
       - name: Byte-compile vendored backend sources
         run: uv run python -m py_compile src/keras_tinygrad/_backend/*.py

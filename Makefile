@@ -10,7 +10,7 @@ export CC := $(HOME)/.local/bin/zigcc
 endif
 
 .PHONY: verify lint-check format-check format tests-fast tutorial test \
-        smoke fuzz fuzz-grad vendor-check
+        smoke fuzz fuzz-grad vendor-check readme-check
 
 ## verify: the pre-review gate — lint + format + fast tests
 verify: lint-check format-check tests-fast
@@ -53,3 +53,7 @@ fuzz-grad:
 ## vendor-check: loader patch anchors match the installed keras exactly once
 vendor-check:
 	$(UV) run python scripts/sync_vendor.py --self-check
+
+## readme-check: the README's tally/matrix numbers are internally consistent
+readme-check:
+	$(UV) run python scripts/check_readme_numbers.py
