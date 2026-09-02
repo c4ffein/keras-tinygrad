@@ -1,0 +1,14 @@
+{
+  "name": "keras-tinygrad",
+  "version": "0.0.1",
+  "description": "Run Keras training steps in the browser on WebGPU — the JS side of the keras-tinygrad Python package (loads its exported bundles; in-tab tracing is the roadmap)",
+  "type": "module",
+  "main": "src/index.mjs",
+  "exports": { ".": "./src/index.mjs" },
+  "files": ["src", "README.md", "LICENSE"],
+  "keywords": ["keras", "tinygrad", "webgpu", "machine-learning", "training", "browser"],
+  "author": "c4ffein",
+  "license": "Apache-2.0",
+  "repository": { "type": "git", "url": "git+https://github.com/c4ffein/keras-tinygrad.git", "directory": "js" },
+  "homepage": "https://github.com/c4ffein/keras-tinygrad#readme"
+}

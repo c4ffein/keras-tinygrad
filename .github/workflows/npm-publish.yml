@@ -1,0 +1,76 @@
+# Publish the JS package (js/) to npm — token-free via npm Trusted
+# Publishing (OIDC), mirroring the PyPI workflow's discipline: verify the
+# artifact, then publish with provenance attestations. No npm token ever
+# exists on any dev box.
+#
+# One-time setup (all in the browser, nothing on any box):
+#   1. npmjs.com account with 2FA.
+#   2. EITHER configure Trusted Publishing for the package (npm package
+#      settings -> Publishing access -> add GitHub Actions publisher:
+#      repo c4ffein/keras-tinygrad, workflow npm-publish.yml) — if npm
+#      only allows this for EXISTING packages, then for the very first
+#      publish: create a granular automation token scoped to publish,
+#      store it as the NPM_TOKEN repo secret on GitHub (browser -> GitHub,
+#      never a dev box), let this workflow's fallback use it once, then
+#      configure Trusted Publishing and DELETE the token.
+#      (Verify current npm docs — their trusted-publishing rollout has
+#      been evolving.)
+#
+# Release flow: bump version in js/package.json, then
+#     git tag js-v<version> && git push origin js-v<version>
+
+name: Publish JS package to npm
+
+on:
+  push:
+    tags: ["js-v*"]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+      - name: Tag must match js/package.json version
+        run: |
+          v=$(bun -e "console.log(JSON.parse(await Bun.file('js/package.json').text()).version)")
+          test "js-v$v" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} != js version js-v$v"; exit 1; }
+      - name: Module smoke + Python-parity check of the LCG stream
+        working-directory: js
+        run: |
+          bun -e "
+          import { lcg32, importRunner, loadBundle, fetchBundle } from './src/index.mjs';
+          for (const f of [importRunner, loadBundle, fetchBundle]) if (typeof f !== 'function') throw new Error('missing export');
+          const g = lcg32();
+          const got = [g.rand(), g.rand(), g.gauss()].map(v => v.toFixed(6)).join(' ');
+          const want = '0.971873 0.250264 -0.113998'; // matches the Python twin bit-for-bit
+          if (got !== want) throw new Error('LCG drifted from the Python twin: ' + got);
+          console.log('smoke OK:', got);
+          "
+      - name: Pack (dry run)
+        working-directory: js
+        run: bun pm pack --dry-run
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      id-token: write # trusted publishing / provenance
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24" # bundles npm >= 11.5.1 (trusted publishing requirement)
+          registry-url: "https://registry.npmjs.org"
+      - name: Publish with provenance
+        working-directory: js
+        env:
+          # Empty when Trusted Publishing is configured (OIDC handles auth).
+          # For the one-time first publish before TP exists, set the
+          # NPM_TOKEN repo secret; delete it after TP is configured.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance --access public
