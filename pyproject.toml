@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "keras-tinygrad"
-version = "0.1.0"
+version = "0.1.1"
 description = "Out-of-tree tinygrad backend for stock Keras 3 (KERAS_BACKEND=tinygrad)"
 readme = "README.md"
 authors = [{ name = "c4ffein" }]
@@ -65,9 +65,16 @@ dev = [
 
 [tool.ruff]
 line-length = 120
-# The vendored backend is a byte-identical snapshot of the keras clone
-# (sync_vendor.py --check enforces it); lint/format must never touch it.
-extend-exclude = ["src/keras_tinygrad/_backend"]
+# The backend sources are the source of truth (no keras clone since
+# 2026-08-30) and must stay byte-stable for upstream diffs; lint/format
+# must never touch them. scripts/referee.sh is what tests them.
+extend-exclude = [
+    "src/keras_tinygrad/_backend",
+    "src/keras_tinygrad/_vendor",  # third-party bytes, pinned to the experiment copies
+    # spike code (incl. vendored exporter that must stay byte-aligned with
+    # nnvp's TinygradRuntime); linted by eye, never reformatted by tooling
+    "experiments",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]
