@@ -21,7 +21,21 @@ import os
 
 from keras_tinygrad._loader import install
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
+
+
+def reset_device_rng():
+    """Re-seed the on-device RNG stream at the next train-step draw.
+
+    The trainer does this itself whenever it builds a train function, so
+    `keras.utils.set_random_seed(s)` + build + `fit` is reproducible. Call
+    this after `set_random_seed` only when no train function is rebuilt
+    (e.g. a `train_on_batch` loop on an already-compiled model). Details:
+    docs/device-rng.md.
+    """
+    from keras.src.backend.tinygrad import random as backend_random
+
+    backend_random.reset_device_stream()
 
 
 def _keras_supports_backend_plugins():

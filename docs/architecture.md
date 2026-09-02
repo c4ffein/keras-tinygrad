@@ -92,7 +92,7 @@ numpy round-trips) and to make every exit from it explicit.
 | Keras↔tinygrad dtype tables | `core` module constants | the single mapping; `standardize_dtype` shim routes through it |
 | Monkeypatched class attributes (`Tensor.__bool__`, `__array__`, `__float__`, `__int__`, `__index__`; `DType.__str__`) | installed at import time by `numpy` (scalar interop) and `core` (dtype str) | process-global; closed set (invariant 6) |
 | Custom-gradient tape | `core` thread-local; a tape is opened per train step by the trainer | outside a tape, `custom_gradient` blocks are forward passthrough |
-| RNG state | none held by the backend — a fresh numpy `Generator` per call from the drawn seed | statefulness lives in Keras' `SeedGenerator`, like every backend |
+| RNG state | host path: none — a fresh numpy `Generator` per call from the drawn seed. Device path (inside `device_rng_scope`): tinygrad's per-device threefry `(seed, counter)` tensors, re-seeded per train-function build from the first device draw's SeedGenerator, which that seeding advances (`random._ensure_device_stream_seeded` / `reset_device_stream`) | statefulness otherwise lives in Keras' `SeedGenerator`, like every backend |
 | DFT constant matrices | `math` module cache keyed by (kind, n, dtype) | host-built constants, not gradient paths |
 | train/test/predict function slots | `TinygradTrainer` instance | test/predict are plain closures; train is a `_TrainStepJit`: per-batch-signature `TinyJit` captures (cap 8) + a variable→pinned-buffer binding so weight updates propagate into replays |
 
@@ -127,12 +127,11 @@ point is inert and the hook patches as described below.
 **The rule:** these six ARE the contract between the backend and keras-core.
 Any change that adds a keras-core touchpoint must add the matching anchor to
 the package loader's patch table (`_loader.py`'s `_PATCHES`) in the same
-change — a touchpoint that exists only in the reference clone is invisible
-to every user of the packaged hook. `scripts/sync_vendor.py --check` guards
-source drift between the clone and `_backend/` and byte-equality between
-the clone's in-tree keras-core edits and the loader's replacement texts
-(the clone is the patched state); `--self-check` guards anchor drift
-against installed stock Keras (the unpatched state).
+change — a touchpoint that exists only in a hand-patched keras tree is
+invisible to every user of the packaged hook. `scripts/sync_vendor.py
+--self-check` guards anchor drift against installed stock Keras (the
+unpatched state); the referee (`scripts/referee.sh`) runs Keras' tests
+through the hook itself, so a missing anchor fails there too.
 
 ### The tensor boundary (core)
 
@@ -187,8 +186,14 @@ tape opener; symbolic build / predict / evaluate see passthrough behavior.
 7. Scalars are shape `()`, not `(1,)`.
 8. int8 matmul accumulates in int32 (quantized inference corrupts otherwise).
 9. Random ops are numpy-Generator sampling under Keras seeding —
-   bit-reproducible against the reference backend; samples are autograd
-   constants.
+   bit-reproducible against the reference backend — EXCEPT inside the
+   trainer's `device_rng_scope`, where dropout/normal/uniform seeded by a
+   SeedGenerator or by None (Keras' global generator) sample on-device
+   (tinygrad threefry): those draws are deterministic under Keras seeding
+   (the stream is seeded from the seed state at every train-function
+   build; receipts in `tests/test_backend_regressions.py`) but
+   NOT numpy-bit-parity — the scoped deviation whose decision record is
+   `docs/device-rng.md`. Samples are autograd constants on both paths.
 10. `custom_gradient` is honored only under the trainer's tape; elsewhere it
     is a forward passthrough by design.
 11. Every keras-core touchpoint has an anchor in the loader's patch table —
@@ -203,7 +208,9 @@ tape opener; symbolic build / predict / evaluate see passthrough behavior.
   `JitError` on any host data access during capture, so every freeze
   hazard (host RNG, `.item()`, `ops.cond` schedules) fails loudly at
   capture and the trainer falls back to eager with a warning. Static
-  eager gates: custom `train_step`, seed generators (dropout),
+  eager gates: custom `train_step`, seed-generator layers not on
+  `_device_rng_covers`'s exact-type list (covered layers keep the JIT
+  because their draws are on-device),
   LossScaleOptimizer, gradient accumulation, EMA, non-empty
   custom-gradient tape (quantized training), `run_eagerly`. Escape hatch
   `KERAS_TINYGRAD_TRAINER_JIT=0`. Eager-vs-jit verified bit-for-bit over
@@ -219,8 +226,11 @@ tape opener; symbolic build / predict / evaluate see passthrough behavior.
   CPU, a cost on accelerators.
 - `scatter_update` applies updates one masked `where` at a time to preserve
   numpy's duplicate-index ordering — O(updates) graph depth.
-- `scatter` materializes an O(slots × updates) one-hot matrix (differentiable
-  w.r.t. values, but a memory cliff at embedding scale).
+- `scatter` is built as a one-hot matmul; the one-hot exists only
+  symbolically — tinygrad fuses it into the reduce kernel, so memory stays
+  flat (measured 2026-08-29: 0.4 GB peak at 1M slots × 50k updates, capped
+  subprocess). The cost is compute, O(slots × updates) fused work: ~4 s at
+  that extreme scale, negligible below it. Differentiable w.r.t. values.
 - Quantized training pays twice: `compute_gradients` composes VJPs in
   O(blocks²) lazy-graph builds, and a non-empty custom-gradient tape gates
   the train-step JIT off — the slowest configuration on both axes at once.
@@ -236,6 +246,7 @@ tape opener; symbolic build / predict / evaluate see passthrough behavior.
   uniform loud `NotImplementedError`; `SUPPORTS_COMPLEX_DTYPES` stays False.
   The tier boundary (interop vs arithmetic) and the rule for extending the
   wrapper's op set: `docs/complex-support.md`.
-- The backend sources live twice: the keras clone (source of truth) and the
-  vendored `_backend/` snapshot; `sync_vendor.py --check` is the drift alarm,
-  not a merge tool.
+- The backend sources live ONCE: `src/keras_tinygrad/_backend/`. (Until
+  2026-08-30 they were a snapshot of a sibling keras clone; that clone is
+  now a leftover and no tool reads it.) The referee clones the pinned
+  keras tag on its own into `.referee/`.

@@ -1,5 +1,6 @@
 import builtins
 import contextlib
+import os
 import math
 import threading
 import warnings
@@ -286,14 +287,23 @@ def _convert_to_complex(x, dtype):
 class Variable(KerasVariable):
     def _initialize(self, value):
         value = convert_to_tensor(value, dtype=self._dtype)
-        # `.realize()` keeps the stored value a concrete buffer rather than
-        # an unbounded lazy graph accumulating across training steps.
-        self._value = value.detach().realize()
+        # `.contiguous().realize()` keeps the stored value a concrete buffer
+        # rather than an unbounded lazy graph accumulating across training
+        # steps. The `.contiguous()` is load-bearing for scalar-initialized
+        # variables (an SGD learning rate): convert_to_tensor gives a CONST
+        # uop, realize alone is a no-op on it, and a const-backed Variable
+        # bakes into traces as an immediate — the exported lr could never be
+        # changed again. ORDER matters: contiguous() BEFORE detach() — a
+        # DETACH in front defeats tinygrad's buffer-identity short-circuit,
+        # turning every assign of an already-realized tensor into a full
+        # copy kernel plus a fresh allocation (measured; see
+        # tests/test_backend_regressions.py).
+        self._value = value.contiguous().detach().realize()
         self._value.requires_grad = bool(self.trainable)
 
     def _direct_assign(self, value):
         value = convert_to_tensor(value, dtype=self._dtype)
-        self._value = value.detach().realize()
+        self._value = value.contiguous().detach().realize()
         self._value.requires_grad = bool(self.trainable)
 
     def _convert_to_tensor(self, value, dtype=None):
@@ -353,6 +363,14 @@ def convert_to_tensor(x, dtype=None, sparse=None, ragged=None):
             else e,
             x,
         )
+    if isinstance(x, (bool, int, float)):
+        # Python scalars MUST become tinygrad CONST UOps, never buffer-backed
+        # tensors. The numpy path below promotes 0-d to shape (1,) (that's
+        # np.ascontiguousarray) and wraps the buffer — an anonymous input
+        # buffer that export_model cannot save: SGD's momentum=0.9 exported
+        # as a zeroed createEmptyBuf and the browser bundle silently trained
+        # plain SGD. A const folds into kernels as an immediate.
+        return Tensor(x, dtype=to_tinygrad_dtype(dtype))
     arr = np.asarray(x)
     tg_dtype = to_tinygrad_dtype(dtype)
     if dtype in _NUMPY_NATIVE_DTYPES:
@@ -869,6 +887,35 @@ def random_seed_dtype():
 # Without an active tape (predict/evaluate/symbolic build), blocks act as a
 # forward passthrough, which is all those paths need.
 _custom_gradient_tape = threading.local()
+
+# Device-RNG scope: random ops draw on-device (threefry, in-graph) ONLY
+# inside this scope — entered by the trainer around the train step, and by
+# export drivers around their traced step. Outside it (initializers, the
+# global seed generator, direct keras.random.* calls) sampling stays on
+# the host, bit-identical to the reference backend. docs/device-rng.md.
+def device_rng_enabled():
+    """Single authority for the KERAS_TINYGRAD_DEVICE_RNG flag (default on).
+    Read it through this function only — independent env reads in different
+    modules invite drift between the trainer's JIT gate and the sampling
+    path."""
+    return os.environ.get("KERAS_TINYGRAD_DEVICE_RNG", "1") == "1"
+
+
+_device_rng_scope = threading.local()
+
+
+@contextlib.contextmanager
+def device_rng_scope():
+    prev = getattr(_device_rng_scope, "active", False)
+    _device_rng_scope.active = True
+    try:
+        yield
+    finally:
+        _device_rng_scope.active = prev
+
+
+def in_device_rng_scope():
+    return getattr(_device_rng_scope, "active", False)
 
 
 @contextlib.contextmanager

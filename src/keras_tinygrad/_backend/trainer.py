@@ -31,6 +31,8 @@ from keras.src.backend.common.keras_tensor import KerasTensor
 from keras.src.backend.tinygrad.core import compute_gradients
 from keras.src.backend.tinygrad.core import convert_to_tensor
 from keras.src.backend.tinygrad.core import custom_gradient_tape
+from keras.src.backend.tinygrad.core import device_rng_enabled
+from keras.src.backend.tinygrad.core import device_rng_scope
 from keras.src.backend.tinygrad.core import is_tensor
 from keras.src.trainers import trainer as base_trainer
 from keras.src.trainers.data_adapters import array_slicing
@@ -38,6 +40,40 @@ from keras.src.trainers.data_adapters import data_adapter_utils
 from keras.src.trainers.epoch_iterator import EpochIterator
 from keras.src.utils import traceback_utils
 from keras.src.utils.python_utils import pythonify_logs
+
+
+def _device_rng_covers(layer):
+    """True iff every random draw this layer makes in its step uses the
+    device-RNG path (and the path is enabled), making it safe inside a
+    TinyJit capture. Covered: the regularization family whose draws are
+    exactly `random.dropout` / `random.normal` / `random.uniform` through
+    their SeedGenerators — the three ops with on-device threefry
+    implementations. EXACT types only: a subclass (SpatialDropout, or a
+    user class) may add host-side randomness in call() that a capture
+    would bake and silently replay frozen — a class earns a place on this
+    list only with its own A/B receipt (jit-disabled comparison, see
+    docs/device-rng.md). The preprocessing Random* family stays uncovered
+    (mixed op usage incl. host-only samplers) and keeps forcing eager —
+    still correct there: covered ops sample on-device, host-only ops
+    sample numpy, both fresh every eager step."""
+    if not device_rng_enabled():
+        return False
+    try:
+        from keras.src.layers.regularization.alpha_dropout import AlphaDropout
+        from keras.src.layers.regularization.dropout import Dropout
+        from keras.src.layers.regularization.gaussian_dropout import (
+            GaussianDropout,
+        )
+        from keras.src.layers.regularization.gaussian_noise import (
+            GaussianNoise,
+        )
+    except ImportError:
+        # keras moved these private modules (this runs mid-fit on whatever
+        # keras version the user has): fail SAFE — eager, never a frozen
+        # capture, never an ImportError out of the second batch.
+        return False
+
+    return type(layer) in (Dropout, GaussianNoise, GaussianDropout, AlphaDropout)
 
 
 class _TrainStepJit:
@@ -149,8 +185,14 @@ class _TrainStepJit:
             reason = "custom-gradient tape in use (quantized training)"
         elif any(
             getattr(layer, "_seed_generators", None)
+            and not _device_rng_covers(layer)
             for layer in trainer._flatten_layers()
         ):
+            # Layers whose randomness draws ON DEVICE (threefry counter
+            # advances in-graph — docs/device-rng.md) replay fresh under
+            # capture and don't gate. Every OTHER seed-generator layer
+            # still samples host-side numpy, which a capture would bake
+            # and silently replay frozen — those keep forcing eager.
             reason = "seed generators present (host-side RNG in the step)"
         elif not trainer.trainable_weights or trainer.optimizer is None:
             reason = "no trainable weights"
@@ -316,7 +358,7 @@ class TinygradTrainer(base_trainer.Trainer):
         # Record `custom_gradient` blocks (quantized layers) during the
         # forward pass so `compute_gradients` can honor their backward
         # functions; with no such blocks this is exactly `loss.gradient`.
-        with custom_gradient_tape() as tape_blocks:
+        with custom_gradient_tape() as tape_blocks, device_rng_scope():
             if self._call_has_training_arg:
                 y_pred = self(x, training=True)
             else:
@@ -380,6 +422,14 @@ class TinygradTrainer(base_trainer.Trainer):
     def make_train_function(self, force=False):
         if self.train_function is not None and not force:
             return self.train_function
+
+        # A new train function is a new training run: the device RNG stream
+        # re-seeds from the Keras seed state at its first draw, which lands
+        # in the eager probe step below (never inside a capture — see
+        # random.reset_device_stream for why that matters).
+        from keras.src.backend.tinygrad import random as backend_random
+
+        backend_random.reset_device_stream()
 
         # Rebuilt whenever the train function is (fresh compile / `force`),
         # so gates and captures never outlive the optimizer/metrics they
