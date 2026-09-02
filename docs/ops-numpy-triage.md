@@ -7,9 +7,7 @@ follow-up waves can be planned and sized. Numbers verified with one full run
 on write day; re-verify with the command below rather than trusting them.
 
 ```sh
-cd /home/dev/workspace/keras && KERAS_BACKEND=tinygrad \
-  CC=/home/dev/.local/bin/zigcc /home/dev/workspace/ktg-venv/bin/python \
-  -m pytest keras/src/ops/numpy_test.py -q --no-header -p no:cacheprovider
+scripts/referee.sh keras/src/ops/numpy_test.py   # clones the pinned keras tag itself
 ```
 
 ## The tally (2026-08-03, keras clone, tinygrad backend)

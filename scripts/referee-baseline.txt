@@ -1,0 +1,9 @@
+# Known failures of the referee tree (keras/src/layers) — one pytest id per
+# line. scripts/referee.sh exits 1 on ANY difference from the live run, in
+# either direction; move a line only with the tally that justifies it.
+# Why each fails: README "Verified against Keras' own test suite".
+keras/src/layers/core/dense_test.py::DenseTest::test_quantize_float8
+keras/src/layers/core/einsum_dense_test.py::EinsumDenseTest::test_quantize_float8
+keras/src/layers/preprocessing/image_preprocessing/auto_contrast_test.py::AutoContrastTest::test_auto_contrast_different_values_per_channel
+keras/src/layers/preprocessing/image_preprocessing/random_crop_test.py::RandomCropTest::test_dict_input
+keras/src/layers/preprocessing/image_preprocessing/random_crop_test.py::RandomCropTest::test_random_crop

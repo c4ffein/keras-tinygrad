@@ -1,56 +1,27 @@
 #!/usr/bin/env python3
-"""Keep the vendored backend in sync with the keras clone it snapshots.
+"""Loader patch-anchor check (formerly also a vendor sync).
 
-The sources under ``src/keras_tinygrad/_backend/`` are a snapshot of
-``<keras-clone>/keras/src/backend/tinygrad/`` and go stale as that clone
-evolves.  This tool (stdlib only) has three modes:
+The backend sources under ``src/keras_tinygrad/_backend/`` ARE the source
+of truth (since 2026-08-30; before that they were a snapshot of a sibling
+keras clone, and this tool copied them across).  What remains is the one
+check that needs no clone:
 
-  --check       Diff vendored files against the source-of-truth clone and
-                verify the clone's in-tree keras-core edits are byte-equal
-                to ``_loader.py``'s replacement texts (the clone is the
-                PATCHED state; anchors are for unpatched stock keras).
-                Exit 1 on any drift, with a per-file report.
-  --sync        Copy the clone's backend files over the vendored snapshot.
-                Vendored files that no longer exist in the clone are NOT
-                deleted unless --force is given.
-  --self-check  Validate only the ``_loader.py`` patch anchors, against the
-                *installed* keras (no clone needed -- usable in CI).
+  --self-check  Every ``_loader.py`` patch anchor occurs exactly once in
+                the *installed* stock keras, so the import hook's
+                exact-string patches will apply.  (Also the default.)
 
-The keras clone defaults to a sibling checkout of this repository
-(``../keras``); override with --source PATH (path to the clone root, the
-directory that contains ``keras/``).
+The referee (Keras' own test suite against this package) lives in
+``scripts/referee.sh``; it clones the pinned keras tag itself.
 """
 
 import argparse
 import importlib.util
 import os
-import shutil
 import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VENDORED_DIR = os.path.join(REPO_ROOT, "src", "keras_tinygrad", "_backend")
 LOADER_PATH = os.path.join(REPO_ROOT, "src", "keras_tinygrad", "_loader.py")
-DEFAULT_SOURCE = os.path.join(os.path.dirname(REPO_ROOT), "keras")
-BACKEND_REL = os.path.join("keras", "src", "backend", "tinygrad")
-
-
-def list_py(directory):
-    """Names of the .py files directly in `directory` (no __pycache__)."""
-    # This sync (and the wheel's package-data glob) is deliberately flat;
-    # a subpackage appearing in the backend would be silently unsynced,
-    # unchecked, and unshipped — so refuse loudly instead.
-    subdirs = [
-        name for name in os.listdir(directory) if os.path.isdir(os.path.join(directory, name)) and name != "__pycache__"
-    ]
-    if subdirs:
-        raise SystemExit(
-            f"sync_vendor: backend directory {directory} contains "
-            f"subdirectories {subdirs}; the flat sync/check/package-data "
-            "story must be extended before adding subpackages."
-        )
-    return sorted(
-        name for name in os.listdir(directory) if name.endswith(".py") and os.path.isfile(os.path.join(directory, name))
-    )
 
 
 def read(path):
@@ -82,11 +53,9 @@ def check_anchors(keras_pkg_dir, label, expect):
 
     expect="unpatched" -- stock keras (installed wheel): every ANCHOR must
     occur exactly once, so the loader's exact-string patch will apply.
-    expect="patched" -- the source-of-truth clone, which carries the edits
-    in-tree: every REPLACEMENT must occur exactly once, i.e. the clone's
-    edit and the loader's replacement text are the same bytes.  (Checking
-    anchors against the clone is wrong by construction: replacing patches
-    like the standardize_dtype shim consume their anchor.)
+    expect="patched" -- a keras tree that already carries the edits
+    in-tree: every REPLACEMENT must occur exactly once. (Kept for tooling
+    that inspects a patched tree; the hook path never needs it.)
 
     Returns a list of problem strings (empty = all good).
     """
@@ -130,73 +99,6 @@ def report_anchors(keras_pkg_dir, label, expect):
     return not problems
 
 
-def compare(source_dir):
-    """(changed, added, removed) file-name lists, vendored vs source."""
-    vendored = set(list_py(VENDORED_DIR))
-    upstream = set(list_py(source_dir))
-    changed = sorted(
-        name
-        for name in vendored & upstream
-        if read(os.path.join(VENDORED_DIR, name)) != read(os.path.join(source_dir, name))
-    )
-    added = sorted(upstream - vendored)  # in the clone, not vendored yet
-    removed = sorted(vendored - upstream)  # vendored, gone from the clone
-    return changed, added, removed
-
-
-def resolve_source(args):
-    source_dir = os.path.join(args.source, BACKEND_REL)
-    if not os.path.isdir(source_dir):
-        sys.exit(
-            f"error: source-of-truth backend not found: {source_dir}\n"
-            "(--source must point at a keras clone root, the directory"
-            " containing keras/)"
-        )
-    return source_dir
-
-
-def cmd_check(args):
-    source_dir = resolve_source(args)
-    changed, added, removed = compare(source_dir)
-    print(f"Vendored:        {VENDORED_DIR}")
-    print(f"Source of truth: {source_dir}")
-    if not (changed or added or removed):
-        print("  OK  vendored snapshot matches the clone")
-    for name in changed:
-        print(f"  CHANGED  {name}")
-    for name in added:
-        print(f"  ADDED    {name}  (in clone, missing from vendored)")
-    for name in removed:
-        print(f"  REMOVED  {name}  (vendored, missing from clone)")
-    anchors_ok = report_anchors(os.path.join(args.source, "keras"), "clone", expect="patched")
-    ok = not (changed or added or removed) and anchors_ok
-    return 0 if ok else 1
-
-
-def cmd_sync(args):
-    source_dir = resolve_source(args)
-    changed, added, removed = compare(source_dir)
-    if removed and not args.force:
-        sys.exit(
-            "error: vendored files not present in the clone: "
-            + ", ".join(removed)
-            + "\nRefusing to delete them; re-run with --force to remove."
-        )
-    for name in changed + added:
-        shutil.copyfile(os.path.join(source_dir, name), os.path.join(VENDORED_DIR, name))
-        print(f"  copied   {name}")
-    if args.force:
-        for name in removed:
-            os.remove(os.path.join(VENDORED_DIR, name))
-            print(f"  deleted  {name}")
-    if not (changed or added or (args.force and removed)):
-        print("  nothing to do; vendored snapshot already matches")
-    # Anchors are informational on sync: they live in _loader.py, which this
-    # tool never edits, so drift there needs a manual fix.
-    anchors_ok = report_anchors(os.path.join(args.source, "keras"), "clone", expect="patched")
-    return 0 if anchors_ok else 1
-
-
 def cmd_self_check():
     spec = importlib.util.find_spec("keras")
     if spec is None or not spec.submodule_search_locations:
@@ -207,39 +109,13 @@ def cmd_self_check():
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument(
-        "--check",
-        action="store_true",
-        help="report drift between vendored snapshot and the clone (exit 1)",
-    )
-    mode.add_argument(
-        "--sync",
-        action="store_true",
-        help="copy the clone's backend files over the vendored snapshot",
-    )
-    mode.add_argument(
+    parser.add_argument(
         "--self-check",
         action="store_true",
-        help="validate loader patch anchors against the installed keras only",
+        help="validate loader patch anchors against the installed keras (default)",
     )
-    parser.add_argument(
-        "--source",
-        default=DEFAULT_SOURCE,
-        metavar="PATH",
-        help="keras clone root (default: sibling ../keras of this repo)",
-    )
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="with --sync: also delete vendored files absent from the clone",
-    )
-    args = parser.parse_args(argv)
-    if args.self_check:
-        return cmd_self_check()
-    if args.sync:
-        return cmd_sync(args)
-    return cmd_check(args)
+    parser.parse_args(argv)
+    return cmd_self_check()
 
 
 if __name__ == "__main__":

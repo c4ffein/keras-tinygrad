@@ -5,3 +5,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 uv.lock
+.referee/
+build/
+dist/
+experiments/**

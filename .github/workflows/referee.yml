@@ -1,0 +1,36 @@
+# The referee in CI: Keras' own layers tree against this package, on the
+# pinned keras tag, compared to scripts/referee-baseline.txt. Weekly + on
+# demand. ~30-40 min. Red means the FAILED set moved in either direction.
+name: referee
+on:
+  workflow_dispatch:
+    inputs:
+      paths:
+        description: "pytest paths inside the keras tree (empty = keras/src/layers, baseline-checked)"
+        default: ""
+  schedule:
+    - cron: "0 6 * * 1"   # Mondays 06:00 UTC
+permissions:
+  contents: read
+jobs:
+  referee:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.0.1
+      - name: run the referee
+        env:
+          PATHS: ${{ inputs.paths }}   # via env, never interpolated into the shell line
+        run: scripts/referee.sh $PATHS   # unquoted on purpose: space-separated paths
+      - name: summary
+        if: always()
+        run: |
+          {
+            echo '### referee'
+            echo '```'
+            grep -E "^referee:" .referee/last-run.log 2>/dev/null || true
+            grep -E "^=+ .*(passed|failed)" .referee/last-run.log | tail -1
+            grep -E "^FAILED" .referee/last-run.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
