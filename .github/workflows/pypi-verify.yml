@@ -4,10 +4,13 @@
 # tinygrad backend, and separately prove the patched keras still behaves as
 # stock keras when another backend is selected.
 #
-# Pre-publish twin, for orientation: publish.yml smoke-tests the wheel it
-# just BUILT; this workflow certifies the package PyPI actually SERVES.
-# Run manually after a release lands, giving the index a few minutes to
-# propagate.
+# Runs twice daily, but SKIPS unless the dependency resolution changed:
+# the published wheel is frozen, so the only thing that can break it is the
+# ecosystem resolving differently than last time. The fingerprint of the
+# would-be-installed set (pip --dry-run --report) is compared against the
+# ledger on the `ci-state` branch; every completed run is recorded there
+# (version set, date, pass/fail) — a browsable history of which
+# resolutions were proven. Manual dispatch always runs.
 
 name: Verify published PyPI release
 
@@ -18,12 +21,59 @@ on:
         description: "keras-tinygrad version on PyPI (empty = latest)"
         required: false
         default: ""
+  schedule:
+    - cron: "17 6,18 * * *"
 
 permissions: {}
 
 jobs:
+  fingerprint:
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+      fp: ${{ steps.decide.outputs.fp }}
+      resolved: ${{ steps.decide.outputs.resolved }}
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Resolve (dry run) and compare against ci-state ledger
+        id: decide
+        run: |
+          python -m pip install --upgrade pip -q
+          # Fingerprint the SAME spec the verify jobs will install: a pinned
+          # manual dispatch must not write its result under the fingerprint
+          # of the latest release it never tested.
+          spec="keras-tinygrad"
+          if [ -n "${{ inputs.version }}" ]; then spec="keras-tinygrad==${{ inputs.version }}"; fi
+          pip install --dry-run --quiet --report report.json "$spec"
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import hashlib, json, os, urllib.request
+
+          report = json.load(open("report.json"))
+          versions = sorted(
+              f"{p['metadata']['name']}=={p['metadata']['version']}"
+              for p in report["install"]
+          )
+          fp = hashlib.sha256("\n".join(versions).encode()).hexdigest()[:16]
+          print(f"fp={fp}")
+          print(f"resolved={' '.join(versions)}")
+          seen_pass = False
+          try:
+              url = ("https://raw.githubusercontent.com/c4ffein/keras-tinygrad/"
+                     "ci-state/pypi-verify-state.json")
+              state = json.load(urllib.request.urlopen(url))
+              seen_pass = state.get(fp, {}).get("result") == "pass"
+          except Exception:
+              pass  # no ledger yet -> run
+          manual = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+          print(f"run={'true' if (manual or not seen_pass) else 'false'}")
+          PY
+
   tinygrad-journey:
     name: Train on the tinygrad backend, from PyPI
+    needs: fingerprint
+    if: needs.fingerprint.outputs.run == 'true'
     runs-on: ubuntu-latest
     steps:
       # Deliberately NO actions/checkout: a user has none of this repo.
@@ -72,6 +122,8 @@ jobs:
 
   stock-keras-unharmed:
     name: Patched keras == stock keras on another backend
+    needs: fingerprint
+    if: needs.fingerprint.outputs.run == 'true'
     runs-on: ubuntu-latest
     steps:
       # Deliberately NO actions/checkout.
@@ -83,7 +135,7 @@ jobs:
           spec="keras-tinygrad"
           if [ -n "${{ inputs.version }}" ]; then spec="keras-tinygrad==${{ inputs.version }}"; fi
           python -m pip install --upgrade pip
-          # keras' numpy backend borrows scipy (linalg) and jax (fft).
+          # keras' numpy backend borrows scipy (linalg) and jax (it borrows jax's fft).
           pip install "$spec" scipy "jax[cpu]"
       - name: Explicit KERAS_BACKEND wins; patched keras trains as stock
         working-directory: ${{ runner.temp }}
@@ -105,3 +157,47 @@ jobs:
           assert out.shape == (16, 2), out.shape
           print("stock-keras-unharmed OK (numpy backend, patched keras)")
           PY
+
+  record:
+    name: Record result on ci-state ledger
+    needs: [fingerprint, tinygrad-journey, stock-keras-unharmed]
+    if: always() && needs.fingerprint.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Append result to ci-state branch
+        env:
+          FP: ${{ needs.fingerprint.outputs.fp }}
+          RESOLVED: ${{ needs.fingerprint.outputs.resolved }}
+          RESULT: ${{ (needs.tinygrad-journey.result == 'success' && needs.stock-keras-unharmed.result == 'success') && 'pass' || 'fail' }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin ci-state && git checkout ci-state || git checkout --orphan ci-state
+          git rm -rf --cached . 2>/dev/null || true
+          find . -maxdepth 1 ! -name '.git' ! -name '.' ! -name 'pypi-verify-state.json' ! -name 'keras-versions.json' -exec rm -rf {} + 2>/dev/null || true
+          # Re-stage EVERY surviving ledger: `git rm --cached .` unstaged
+          # keras-versions.json too, and adding only our own file deleted
+          # the keras-watch ledger from the branch on every commit.
+          git add -A .
+          python - <<'PY'
+          import json, os, datetime
+          try:
+              state = json.load(open("pypi-verify-state.json"))
+          except Exception:
+              state = {}
+          state[os.environ["FP"]] = {
+              "result": os.environ["RESULT"],
+              "date": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+              "resolved": os.environ["RESOLVED"].split(),
+          }
+          json.dump(state, open("pypi-verify-state.json", "w"), indent=1, sort_keys=True)
+          PY
+          git add pypi-verify-state.json
+          git commit -m "pypi-verify: $RESULT ($FP)"
+          # Two workflows write this branch (keras-watch too): rebase-retry
+          # instead of failing non-fast-forward on a race.
+          git push origin ci-state \
+            || (git pull --rebase origin ci-state && git push origin ci-state)

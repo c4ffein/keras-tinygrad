@@ -1,0 +1,179 @@
+# THE KERAS-FUTURE CANARY: once a day, look for a keras release we have
+# never tested (including ones OUTSIDE our pin — installed by force, since
+# the whole point is to learn about 3.16 before users do). Run the cheap
+# compatibility battery against it: anchor self-check + loader test suite +
+# training smoke.
+#
+#   green, inside the pin  -> record on the ci-state ledger, done
+#   green, outside the pin -> auto-open a PR bumping the pin ceiling
+#   red                    -> auto-open an issue with the diagnostics
+#
+# Results ledger: keras-versions.json on the `ci-state` branch. Issues are
+# deduped through it. Note: PRs opened with GITHUB_TOKEN do not trigger CI
+# automatically — close/reopen the PR (or push to its branch) to run it.
+#
+# ONE-TIME REPO SETTING (off by default, the PR step fails without it):
+# Settings > Actions > General > Workflow permissions > tick "Allow GitHub
+# Actions to create and approve pull requests". Same thing from a shell:
+#   gh api -X PUT repos/c4ffein/keras-tinygrad/actions/permissions/workflow \
+#     -f default_workflow_permissions=read -F can_approve_pull_request_reviews=true
+# (a PAT in a secret would also work; the setting keeps the default token.)
+
+name: Watch new keras releases
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "47 7 * * *"
+
+permissions: {}
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.0.1
+      - name: Install clang (tinygrad CPU backend compiler)
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - name: Find newest untested keras release
+        id: pick
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, re, urllib.request
+
+          pypi = json.load(urllib.request.urlopen("https://pypi.org/pypi/keras/json"))
+          releases = [
+              v for v, files in pypi["releases"].items()
+              if files and not any(f.get("yanked") for f in files)
+              and re.fullmatch(r"3\.(1[5-9]|[2-9]\d)\.\d+", v)  # >= 3.15.0, stable
+          ]
+          try:
+              url = ("https://raw.githubusercontent.com/c4ffein/keras-tinygrad/"
+                     "ci-state/keras-versions.json")
+              state = json.load(urllib.request.urlopen(url))
+          except Exception:
+              state = {}
+          key = lambda v: tuple(map(int, v.split(".")))
+          untested = sorted((v for v in releases if v not in state), key=key)
+          if untested:
+              v = untested[-1]
+              pin_ceiling = open("pyproject.toml").read()
+              m = re.search(r'"keras>=3\.15,<3\.(\d+)"', pin_ceiling)
+              inside = key(v) < (3, int(m.group(1)), 0)
+              print(f"version={v}")
+              print(f"inside_pin={'true' if inside else 'false'}")
+              print("found=true")
+          else:
+              print("found=false")
+          PY
+      - name: Test keras ${{ steps.pick.outputs.version }} against keras-tinygrad
+        id: test
+        if: steps.pick.outputs.found == 'true'
+        continue-on-error: true
+        run: |
+          uv venv /tmp/kw --python 3.12
+          # keras first and by force; then our package WITHOUT deps so the
+          # pin cannot fight the experiment; then the real deps by hand.
+          uv pip install --python /tmp/kw/bin/python "keras==${{ steps.pick.outputs.version }}"
+          uv pip install --python /tmp/kw/bin/python --no-deps -e .
+          # the tinygrad pin comes from pyproject (single source, like referee.sh)
+          TINYGRAD_PIN=$(grep -o '"tinygrad[^"]*"' pyproject.toml | head -1 | tr -d '"')
+          uv pip install --python /tmp/kw/bin/python "$TINYGRAD_PIN" numpy pytest scipy "jax[cpu]"
+          set -o pipefail
+          {
+            /tmp/kw/bin/python scripts/sync_vendor.py --self-check
+            /tmp/kw/bin/python -m pytest tests -q --no-header --ignore=tests/test_tutorial.py
+            KERAS_BACKEND=tinygrad /tmp/kw/bin/python examples/mlp_smoke.py
+          } 2>&1 | tee /tmp/kw-log.txt
+      - name: Record result on ci-state ledger
+        if: steps.pick.outputs.found == 'true'
+        env:
+          V: ${{ steps.pick.outputs.version }}
+          RESULT: ${{ steps.test.outcome == 'success' && 'pass' || 'fail' }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git stash -u 2>/dev/null || true
+          git fetch origin ci-state && git checkout ci-state || git checkout --orphan ci-state
+          # An orphan checkout keeps main's whole tree staged: prune to the
+          # ledgers only (same block as pypi-verify.yml, which shares the branch).
+          git rm -rf --cached . 2>/dev/null || true
+          find . -maxdepth 1 ! -name '.git' ! -name '.' ! -name 'pypi-verify-state.json' ! -name 'keras-versions.json' -exec rm -rf {} + 2>/dev/null || true
+          git add -A .
+          python - <<'PY'
+          import json, os, datetime
+          try:
+              state = json.load(open("keras-versions.json"))
+          except Exception:
+              state = {}
+          state[os.environ["V"]] = {
+              "result": os.environ["RESULT"],
+              "date": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+          }
+          json.dump(state, open("keras-versions.json", "w"), indent=1, sort_keys=True)
+          PY
+          git add keras-versions.json
+          git commit -m "keras-watch: keras $V -> $RESULT"
+          # pypi-verify writes this branch too: rebase-retry on a race.
+          git push origin ci-state \
+            || (git pull --rebase origin ci-state && git push origin ci-state)
+          git checkout -  # back to main; the PR step below needs its tree (no `|| true`: fail loudly here, not in sed)
+          git stash pop 2>/dev/null || true
+      - name: "Green outside pin: open pin-bump PR"
+        if: steps.pick.outputs.found == 'true' && steps.test.outcome == 'success' && steps.pick.outputs.inside_pin == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ steps.pick.outputs.version }}
+        run: |
+          minor=$(echo "$V" | cut -d. -f2); next=$((minor + 1))
+          branch="keras-watch/bump-$V"
+          git checkout -b "$branch"
+          sed -i "s/\"keras>=3\.15,<3\.[0-9]*\"/\"keras>=3.15,<3.$next\"/" pyproject.toml
+          # Logic lives in a testable script, not workflow sed: the sed
+          # version once produced ("3.15.1" "3.16.0") — Python adjacent-
+          # string concatenation, i.e. the nonsense version 3.15.13.16.0.
+          python scripts/bump_verified_keras.py "$V"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Bump keras pin ceiling: $V passed anchors + loader tests + smoke"
+          git push origin "$branch"
+          gh pr create --title "keras $V: anchors hold — bump pin to <3.$next" --body "$(cat <<EOF
+          Automated by the keras-watch canary.
+
+          keras **$V** was released and passes against this package:
+          - \`sync_vendor.py --self-check\`: all six anchors match exactly once
+          - loader test suite: green
+          - \`examples/mlp_smoke.py\`: trains
+
+          This PR only bumps the pip ceiling. Before merging: run the full
+          referee battery per CONTRIBUTING.md, and update the README's
+          verified-versions sentence. (PRs opened by the bot do not trigger
+          CI — close/reopen to run it.)
+
+          Log: see the workflow run that opened this PR.
+          EOF
+          )"
+      - name: "Red: open issue with diagnostics"
+        if: steps.pick.outputs.found == 'true' && steps.test.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ steps.pick.outputs.version }}
+        run: |
+          gh issue create --title "keras $V breaks keras-tinygrad (canary)" --body "$(cat <<EOF
+          Automated by the keras-watch canary: keras **$V** fails the
+          compatibility battery (anchor self-check / loader tests / smoke).
+
+          Last 60 log lines:
+          \`\`\`
+          $(tail -60 /tmp/kw-log.txt)
+          \`\`\`
+
+          If this is anchor drift, the loader's exact-once diagnostics above
+          name the module and patch. The pip pin protects users meanwhile.
+          EOF
+          )"

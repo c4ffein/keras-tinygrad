@@ -200,6 +200,38 @@ class TinygradBackendFinder(importlib.abc.MetaPathFinder):
 
 _FINDER = None
 
+# Keras versions the full referee battery has been run against (the
+# keras-watch canary opens a PR appending here when a new release passes
+# its checks; the FULL battery is still a manual pre-merge step). This
+# list gates only a WARNING: the anchor exactly-once checks below are the
+# real, never-bypassable compatibility proof — an unlisted version whose
+# anchors match works and merely warns; one whose anchors drifted fails
+# loudly regardless of any list.
+VERIFIED_KERAS_VERSIONS = ("3.15.0", "3.15.1")
+
+
+def _warn_if_unverified_keras():
+    if os.environ.get("KERAS_TINYGRAD_NO_VERSION_WARNING") == "1":
+        return
+    try:
+        from importlib.metadata import version
+
+        installed = version("keras")
+    except Exception:
+        return  # no metadata -> the anchor checks will speak for themselves
+    if installed not in VERIFIED_KERAS_VERSIONS:
+        import warnings
+
+        warnings.warn(
+            f"keras {installed} has not been referee-verified with this "
+            f"keras-tinygrad release (verified: "
+            f"{', '.join(VERIFIED_KERAS_VERSIONS)}). The loader's "
+            "exact-once anchor checks still verify patchability — a "
+            "mismatch fails loudly at import. Silence this warning with "
+            "KERAS_TINYGRAD_NO_VERSION_WARNING=1.",
+            stacklevel=3,
+        )
+
 
 def install():
     """Install the finder (idempotent). Must run before keras is imported."""
@@ -211,5 +243,6 @@ def install():
         raise RuntimeError(
             f"keras_tinygrad must be imported BEFORE keras: these keras modules are already loaded unpatched: {already}"
         )
+    _warn_if_unverified_keras()
     _FINDER = TinygradBackendFinder()
     sys.meta_path.insert(0, _FINDER)
