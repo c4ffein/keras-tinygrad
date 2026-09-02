@@ -50,10 +50,11 @@ pip install keras-tinygrad
 New here? Start with **[TUTORIAL.md](https://github.com/c4ffein/keras-tinygrad/blob/main/TUTORIAL.md)** — every code block on
 that page is executed by CI, so it cannot rot.
 
-Works against the stock PyPI `keras` wheel (3.15.x — 3.15.0 verified by the
-full test tally below; 3.15.1 verified by the loader test suite and the
-executable tutorial, training included) and `tinygrad` 0.13; the dependency
-pin says the same thing (`keras>=3.15,<3.16`). On any other Keras version
+Works against the stock PyPI `keras` wheel (3.15.x — 3.15.1 is the version
+of record: the full test tally below, the loader test suite and the
+executable tutorial, training included, all run against it; 3.15.0's
+patch anchors are verified by the loader suite) and `tinygrad` 0.13; the
+dependency pin says the same thing (`keras>=3.15,<3.16`). On any other Keras version
 the import fails loudly at the anchor check — see below.
 The only rule: `import keras_tinygrad` **before** `import keras` (importing it
 also defaults `KERAS_BACKEND=tinygrad`; an explicit setting always wins). If
@@ -73,10 +74,14 @@ version-mismatch error instead of guessing. Details in
 ## Status
 
 <!-- TALLY -->
-**Keras' own full layers test tree (preprocessing included): 1,989 passed /
-5 failed / 215 skipped (99.7%).** (python 3.12 + tensorflow installed for
-collection; first run 2026-08-03, re-verified identical 2026-08-27 —
-same 5 failures, no regressions.) All 5 failures are individually
+**Keras' own full layers test tree (preprocessing included): 1,988 passed /
+5 failed / 215 skipped (99.7%).** (Tally of 2026-08-30 on the keras
+**v3.15.1** tag tree, produced by `make referee` — `scripts/referee.sh`
+clones the pinned tag itself, python 3.12 + tensorflow for collection, and
+compares the failed set to `scripts/referee-baseline.txt`. Earlier tallies
+— 1,989 passed on a July keras master snapshot, first run 2026-08-03,
+re-verified 2026-08-27 and 2026-08-30 — had the same 5 failures; the one
+fewer test is the tree, not a regression.) All 5 failures are individually
 documented: 2× upstream `test_quantize_float8` (test-side `train_one_step`
 only defined for tf/jax/torch — fix drafted in `docs/upstream/keras-pr/`),
 2× RandomCrop (tinygrad `__getitem__` lacks Tensor slice bounds — upstream
@@ -99,6 +104,17 @@ Verified against Keras' own test suite, per-op:
 - int8 / int4 / float8 quantization working.
 - **No silent fallbacks.** An unimplemented op raises `NotImplementedError`.
   You get an error, never a wrong answer or a silently detached gradient.
+- Training-step randomness (Dropout masks, Gaussian noise/dropout, alpha
+  dropout) draws on-device (tinygrad threefry) so those models keep the
+  JIT-compiled train step — a documented, scoped deviation from the
+  numpy-reference sampling parity. Deterministic under Keras seeding:
+  the device stream is seeded from the seed state, so
+  `set_random_seed`/`Dropout(seed=...)` reproduce across processes
+  (asserted by `tests/test_backend_regressions.py`), but masks are not
+  bit-identical to the numpy reference. Initializers and draws outside
+  the train step keep reference behavior
+  ([docs/device-rng.md](https://github.com/c4ffein/keras-tinygrad/blob/main/docs/device-rng.md);
+  `KERAS_TINYGRAD_DEVICE_RNG=0` restores the reference behavior).
 
 <!-- SUPPORT_MATRIX -->
 | Suite | ✅ passed | ❌ failed | skipped | coverage |
@@ -148,6 +164,22 @@ Honest list:
 - TF-string preprocessing layers.
 - Complex arithmetic (interop works; see
   [docs/complex-support.md](https://github.com/c4ffein/keras-tinygrad/blob/main/docs/complex-support.md)).
+
+## It trains in the browser (experimental)
+
+Because tinygrad is lazy and compiles to WebGPU, a Keras training step
+built through this backend can be traced once on a GPU-less device and
+exported as a WebGPU bundle: WGSL kernels plus a JS runner whose weight
+buffers update in place, so looping `step(x, y)` from JavaScript is SGD
+training. Verified two ways in
+[experiments/m0-keras-trainstep](https://github.com/c4ffein/keras-tinygrad/tree/main/experiments/m0-keras-trainstep):
+the same step object under real execution trains to >80% held-out
+accuracy on separable synthetic classes (`m0.py cpu`), and the exported
+bundle trains in headless Chromium with an asserted loss curve
+(`check.sh`; software WebGPU). Current limits (batch size baked into the
+trace, fixed learning rate, loss built with `reduction=None`; dense and
+dropout layers proven in the browser) and the roadmap:
+[docs/browser-training.md](https://github.com/c4ffein/keras-tinygrad/blob/main/docs/browser-training.md).
 
 ## No clang? Use zig
 

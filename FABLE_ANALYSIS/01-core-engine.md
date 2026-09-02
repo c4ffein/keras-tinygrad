@@ -35,6 +35,14 @@ Fix options, in order of preference:
 
 ### 2.2 MEDIUM — `scatter` materializes an O(slots × updates) one-hot matrix
 
+**[EMPIRICALLY REFUTED 2026-08-29 — no fix needed.]** Measured in an
+RLIMIT_AS-capped subprocess: 200k×20k peaks at 0.40 GB, 1M×50k at 0.41 GB
+(4.2 s). tinygrad's scheduler fuses the elementwise one-hot into the matmul
+reduce kernel; the (m, n) matrix never materializes. This finding read the
+graph construction, not the schedule. The true cost is O(m·n) *compute*
+(documented in architecture.md's known-leaks), not memory. Original
+analysis kept below for the record.
+
 `scatter` (core.py:691-710) builds `onehot` of shape `(m, num_updates)` where `m = prod(shape[:index_length])`. Elegant and differentiable w.r.t. `values`, but scattering 100k updates into a 1M-row table materializes a 10¹¹-element intermediate. Correctness is fine; this is a memory/latency cliff on embedding-scale workloads (`Embedding` gradient paths route through backend scatter in several ops). `scatter_update`'s O(updates) chained-`where` graph depth (core.py:733-746) is a documented quirk (architecture.md "Known leaks") — the `scatter` blow-up is *not* in that list and should be, or bounded (e.g. chunked one-hot matmul).
 
 ### 2.3 MEDIUM (performance, not correctness) — quantized training pays twice

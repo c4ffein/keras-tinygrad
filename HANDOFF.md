@@ -1,4 +1,4 @@
-# HANDOFF — state of the keras-tinygrad bridge (2026-08-03)
+# HANDOFF — state of the keras-tinygrad bridge (2026-09-01)
 
 Written by the session that built all of this in one day, for whoever picks it
 up next (human or agent). Everything below was true at write time; verify with
@@ -8,22 +8,26 @@ the commands given rather than trusting numbers blindly.
 
 The first Keras 3 backend for tinygrad. Two forms:
 
-1. **In-tree**: `/home/dev/workspace/keras` — a keras-team/keras clone with
-   `keras/src/backend/tinygrad/` (~10 modules) plus 6 small keras-core edits
-   (4 dispatch elif chains, `standardize_dtype`, `DynamicBackend`). This is
-   the SOURCE OF TRUTH for backend code. ALL UNCOMMITTED — the owner commits
-   himself, never commit for him.
-2. **Packaged**: this repo — pip package running the same backend against
-   STOCK pypi keras via a meta-path import hook (6 match-exactly-once source
-   patches; see `docs/how-it-works.md`). Vendored copy under
-   `src/keras_tinygrad/_backend/` is synced from the clone by
-   `scripts/sync_vendor.py` (last synced after wave 2; run `--check`).
+1. **In-tree** (historical): `/home/dev/workspace/keras` — a keras-team/keras
+   clone (master 2026-07-25) with `keras/src/backend/tinygrad/` plus 6 small
+   keras-core edits. It was the source of truth until 2026-08-30; it is now
+   a leftover. Nothing in this repo reads it.
+2. **Packaged** (the only form): this repo — pip package running the
+   backend against STOCK pypi keras via a meta-path import hook (6
+   match-exactly-once source patches; see `docs/how-it-works.md`). The
+   backend sources under `src/keras_tinygrad/_backend/` ARE the source of
+   truth. The referee (`make referee` → `scripts/referee.sh`) clones the
+   pinned keras tag into `.referee/` and runs Keras' own tests from inside
+   that tree with the hook active — no hand-edited checkout anywhere.
 
-## Verified state (2026-07-27)
+## Verified state (2026-08-30, RNG/export items re-verified 2026-09-01)
 
-- Keras' own FULL layers tree on the clone, preprocessing included
-  (tf-venv, py3.12+tf, re-certified 2026-08-03 after the jit + op waves):
-  **1,989 passed / 5 failed / 215 skipped / 1 xpassed (99.7%)**. The 5 =
+- Keras' own FULL layers tree, preprocessing included — since 2026-08-30
+  on the keras **v3.15.1 tag tree** via `make referee` (`scripts/referee.sh`,
+  py3.12 + tensorflow for collection, failed set compared to
+  `scripts/referee-baseline.txt`): **1,988 passed / 5 failed / 215 skipped /
+  1 xpassed (99.7%)**. (Earlier tallies on a July keras master snapshot:
+  1,989 passed, same 5 failures — the tree has one test fewer.) The 5 =
   2× upstream float8 (PR package drafted), 2× RandomCrop (tinygrad slice
   bounds, upstream item), 1× AutoContrast (FMA 1.9e-06 vs atol 1e-06).
   The grain/sqlite flake did not reproduce (warm kernel cache). The old
@@ -55,32 +59,87 @@ The first Keras 3 backend for tinygrad. Two forms:
   3.15.1 wheel (downloaded, file-level check); README/pyproject/docs now
   all state 3.15.x — the old "3.15 / 3.16" claim was wrong, 3.16 does not
   exist on PyPI as of 2026-08-03.
-- `sync_vendor.py --check` was crying wolf: it checked ANCHORS against the
-  clone, but the clone is the patched state (the standardize_dtype patch
-  consumes its anchor). It now checks the clone for the REPLACEMENT texts
-  (byte-equal to the loader's) and found real drift doing it: the clone's
-  layer/model elif edits used one-line imports vs the loader's wrapped
-  form — loader aligned to the clone. `--check` and `--self-check` both
-  exit 0 now.
+- `sync_vendor.py` (history): its `--check` mode against the sibling clone
+  is gone with the clone. What remains is the one real guard — every
+  loader anchor occurs exactly once in the INSTALLED stock keras
+  (`make vendor-check`; `--self-check` is the same thing, kept for the
+  workflows' command lines).
+
+## 2026-09-01 review pass (Fable 5.1 over the whole uncommitted diff)
+
+Owner approved every item; all landed in this diff, all uncommitted.
+Receipts: `make verify` (22 tests, ~45 s — five new subprocess
+receipts in `tests/test_backend_regressions.py`), `make browser-assets`
+(green, wheel name derived as 0.1.1), and the full referee:
+**5 failed / 1,988 passed / 215 skipped / 1 xpassed** (0:26:54, v3.15.1
+tree, 2026-09-01) — the FAILED set is exactly the five baseline entries,
+zero regressions from the RNG changes. Run twice: the first run (sharing
+the box with `make verify` + `make browser-assets`) ended with pytest's
+own exit status 127 after a complete summary, so the script stopped
+before its comparison; the clean rerun (0:26:23, same tally) exited 0
+through the script's own check: "OK — failed set == baseline (5 known)".
+
+- **Device RNG revision 2** (`docs/device-rng.md`): the stream re-seeds at
+  every train-function build (`random.reset_device_stream`, called from
+  `make_train_function`; `keras_tinygrad.reset_device_rng()` for loops
+  that never rebuild one) and the seeding draw ADVANCES the generator, so
+  `set_random_seed; build; fit` twice in one process agree while a
+  continued fit moves on (numpy-backend shape). Before: once-per-process
+  seeding — a notebook re-running a cell got new masks. None seeds inside
+  the scope take the device path (a seedless custom layer now JITs with
+  fresh masks instead of the loud eager fallback). Device path coerces
+  numpy-int dims (tinygrad's exact-class argfix).
+- **Export hardening** (`keras_tinygrad.webgpu`): initial values come from
+  each weight's declared initializer (`_initializer_map` resolves the
+  owning layer's `<name>_initializer`; `_host_initial_values` ports Zeros/
+  Ones/Constant/GlorotUniform/RandomUniform/RandomNormal, anything else is
+  a NotImplementedError) — the "Glorot for kernels, zeros elsewhere" rule
+  had exported BatchNormalization's gamma and moving_variance as 0.0, a
+  dead network, silently. The loss must be built with `reduction=None`
+  (checked before tracing: Keras' default divides by a host-tuple tensor
+  that exported as an unwritten buffer). Labels derive from the loss
+  (`Sparse*` → int32 ids, else float32 like the output; `label_shape`/
+  `label_dtype` override). Placeholder batches are `Tensor.empty`, not
+  `randn` (which advanced the captured RNG counter).
+- **One exporter**: m0's `export_model.py` copy deleted, `m0.py` imports
+  `keras_tinygrad._vendor`; the byte-equality test is gone with it.
+  `experiments/pyodide-tinygrad/` keeps a frozen copy on purpose (runs
+  without this package inside Pyodide).
+- **Version 0.1.1** (pyproject + `__version__`): the wheel now ships
+  `webgpu.py` + `_vendor/`. The hub (`gen_hub.py`) and the Pyodide page
+  (`main.js` reads `wheels/latest.txt`) derive the wheel name; `make
+  browser-assets` builds it. Tag `v0.1.1` publishes.
+- **CI**: keras-watch prunes the orphan `ci-state` checkout (its first
+  commit would have carried main's whole tree), rebase-retries the push,
+  reads the tinygrad pin from pyproject; its PR step needs the repo
+  setting "Allow GitHub Actions to create and approve pull requests"
+  (`gh api` one-liner in the workflow header — owner's to flip).
+  referee.sh judges `PYTEST_ARGS` runs as subsets (a `-k` run reported
+  unexecuted baseline entries as NOW PASSING) and strips trailing slashes;
+  referee.yml passes the dispatch input through env. bump script: usage
+  error instead of IndexError; its last test compared a call to itself.
+- **Docs**: README (3.15.1 is the version of record; browser limits),
+  HANDOFF dates + the dead `sync_vendor --check` paragraph, architecture
+  invariant 9 + RNG-state row, device-rng.md revision 2, experiments/
+  README's "2-4× faster" line (steady-state single-box numbers, no run of
+  record — the bench harness already splits setup / first step / steady
+  state, what is missing is a real-GPU run), `run-bench.sh` tf.min.js
+  source (was an nnvp path).
 
 ## How to run anything
 
 ```sh
-# in-tree tests (the referee):
-cd /home/dev/workspace/keras && KERAS_BACKEND=tinygrad \
-  CC=/home/dev/.local/bin/zigcc /home/dev/workspace/ktg-venv/bin/python \
-  -m pytest keras/src/layers/... -q --no-header -p no:cacheprovider
-# packaged smoke (stock keras venv):
-cd /home/dev/workspace/keras-tinygrad-pkg && CC=/home/dev/.local/bin/zigcc \
-  KERAS_BACKEND=tinygrad /home/dev/workspace/pkg-test-venv/bin/python \
-  examples/mlp_smoke.py
-# loader test suite (same venv; pip+pytest were ensurepip'd into it 2026-08-03):
-CC=/home/dev/.local/bin/zigcc /home/dev/workspace/pkg-test-venv/bin/python \
-  -m pytest tests -q --no-header
-# dev loop (uv-based, since 2026-08-03; .venv resolves keras 3.15.1):
-make verify     # ruff lint + format check + loader tests
-make tutorial   # executes every python block in TUTORIAL.md
-make smoke fuzz vendor-check
+# the referee (Keras' own layers tree, ~25 min; clones + builds .referee/
+# on first use, compares FAILED set to scripts/referee-baseline.txt):
+make referee
+# ~1 min slice of the same suite (known failures stay green, any other is red):
+make referee-quick
+# any keras path, e.g. the ops suites:
+scripts/referee.sh keras/src/ops/numpy_test.py
+# dev loop (uv-based; .venv resolves keras 3.15.1):
+make verify     # ruff lint + format + loader tests + backend regression receipts (~45 s)
+make smoke tutorial fuzz vendor-check readme-check
+make browser-assets   # regenerate every browser artifact (bundles, pages, tf.js) — none are in git
 ```
 
 `CC=zigcc` matters: this box has no clang; the shim at
@@ -206,9 +265,11 @@ the PoC doc. NOTE: the zigcc shim now execs via
   docs/upstream-tinygrad-draft.md (slice bounds path traced to
   tensor.py:878/movement.py:87, argfix isinstance one-liner).
 - NNVP integration M0: trace a Keras TrainStep on tinygrad NULL device →
-  WebGPU runner (design + unknowns in the nnvp session scratchpad doc
-  `nnvp-keras-tinygrad-design.md`; the Pyodide probe results in
-  `pyodide-keras/`). This is the one genuinely unproven link.
+  WebGPU runner. **PROVEN 2026-08-30** — `experiments/m0-keras-trainstep/`
+  (Keras Sequential + SGD + sparse CE exported to a self-contained WebGPU
+  runner that trains in headless Chromium; two real bugs found and fixed,
+  see its README). The browser-training story and what to reuse from the
+  migrated nnvp experiments: `docs/browser-training.md`.
 
 ## Related artifacts elsewhere
 
