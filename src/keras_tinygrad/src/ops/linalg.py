@@ -6,7 +6,7 @@ singular values) so the tensor shapes are identical on every step of the
 python loops. Everything is computed internally in float64 (supported by the
 CPU jit) and cast back to the input's float dtype at the end.
 
-Gradients and realization (tinygrad 0.13): once a tensor is realized its
+Gradients and realization (tinygrad 0.13 and 0.14, same probes): once a tensor is realized its
 graph is replaced by the buffer, and `Tensor.gradient` then returns ZEROS
 for everything upstream of it — silently. That holds for `.realize()`, and
 equally for a host read (`.item()`) of anything DOWNSTREAM of a

@@ -112,11 +112,12 @@ echo "referee: keras v$KERAS_VERSION  ${PATHS[*]}"
 echo "referee: ${TALLY:-NO PYTEST SUMMARY LINE — crash? see $LOG}"
 
 # A test file that imports tensorflow (ops/image_test, the preprocessing
-# tree) makes the interpreter abort AT EXIT with tinygrad 0.13 in the same
+# tree) made the interpreter abort AT EXIT with tinygrad 0.13 in the same
 # process — `free(): invalid pointer`, exit 134, after pytest has printed
 # its complete summary; same on the unmodified tree, no test affected
-# (2026-09-21; invisible before because the venv ran tinygrad 0.14, see
-# TINYGRAD_PIN). Only THAT shape is tolerated, loudly: any abort without a
+# (2026-09-21). Not seen on 0.14, the pin since that day; kept because it
+# costs nothing and a future tinygrad may bring it back. Only THAT shape is
+# tolerated, loudly: any abort without a
 # final summary line is still a crash.
 if [ "$PYTEST_STATUS" -ge 2 ]; then
   if [ "$PYTEST_STATUS" -eq 134 ] && [ -n "$TALLY" ] && tail -3 "$LOG" | grep -q "free(): invalid pointer"; then

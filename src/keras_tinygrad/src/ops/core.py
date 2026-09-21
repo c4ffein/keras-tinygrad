@@ -7,6 +7,7 @@ import warnings
 
 import numpy as np
 from tinygrad import Tensor
+from tinygrad.uop.ops import Ops
 from tinygrad import dtypes as tg_dtypes
 from tinygrad.dtype import DType
 
@@ -300,6 +301,26 @@ def _convert_to_complex(x, dtype):
     )
 
 
+def _concrete(value):
+    """`value` as a realized, detached tensor that OWNS A BUFFER.
+
+    `.contiguous().detach().realize()` is the cheap path (see the ORDER note
+    in `Variable._initialize`). On tinygrad 0.13 it also turned a CONST into
+    a buffer; on 0.14 a CONST stays a CONST through it. A const-backed
+    Variable has nothing to pin: the train-step JIT bakes its value into the
+    capture, and every later update of it is lost in replay — silently.
+    Found 2026-09-21 on 0.14: `Mean.reset_state()` assigns the python scalar
+    0, so `count` froze at the first replay (reported loss 0.0 or wrong),
+    and Adam's `iteration`, initialized from 0, froze too (stale bias
+    correction, a different training trajectory). `clone()` forces the
+    buffer on both versions; it is only paid for a CONST.
+    """
+    value = value.contiguous().detach().realize()
+    if value.uop.base.op is not Ops.BUFFER:
+        value = value.clone().realize()
+    return value
+
+
 class Variable(KerasVariable):
     def _initialize(self, value):
         value = convert_to_tensor(value, dtype=self._dtype)
@@ -314,12 +335,12 @@ class Variable(KerasVariable):
         # turning every assign of an already-realized tensor into a full
         # copy kernel plus a fresh allocation (measured; see
         # tests/test_backend_regressions.py).
-        self._value = value.contiguous().detach().realize()
+        self._value = _concrete(value)
         self._value.requires_grad = bool(self.trainable)
 
     def _direct_assign(self, value):
         value = convert_to_tensor(value, dtype=self._dtype)
-        self._value = value.contiguous().detach().realize()
+        self._value = _concrete(value)
         self._value.requires_grad = bool(self.trainable)
 
     def _convert_to_tensor(self, value, dtype=None):
@@ -947,7 +968,7 @@ def custom_gradient_tape():
 
 def in_custom_gradient_tape():
     """True while the trainer is building a differentiated step. Ops with
-    host-side validity checks skip them here: in tinygrad 0.13 a host read
+    host-side validity checks skip them here: in tinygrad 0.13/0.14 a host read
     materializes the `.contiguous()` nodes upstream of it, and gradients
     through a materialized node come back as silent zeros (linalg's module
     docstring has the receipts)."""

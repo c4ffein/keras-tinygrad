@@ -353,3 +353,49 @@ y = keras.ops.image.elastic_transform(np.ones((1, 8, 8, 3), "float32"), seed=0)
 print(tuple(y.shape))
 """)
     assert out == "(1, 8, 8, 3)", out
+
+
+_JIT_STATE = """
+import json
+import keras_tinygrad, keras
+import numpy as np
+keras.utils.set_random_seed(0)
+rng = np.random.default_rng(0)
+x = rng.normal(size=(96, 8)).astype("float32"); y = (x @ rng.normal(size=(8, 1))).astype("float32")
+m = keras.Sequential([keras.layers.Input((8,)), keras.layers.Dense(4, activation="relu"), keras.layers.Dense(1)])
+m.compile(optimizer=keras.optimizers.Adam(0.01), loss="mse", metrics=["mae"])
+# 2 epochs x 6 batches: probe, first jit call, capture, replays - and a metric reset between the epochs
+h = m.fit(x, y, epochs=2, batch_size=16, verbose=0, shuffle=False)
+out, seen = {"history": [round(float(v), 5) for v in h.history["loss"]]}, set()
+for v in list(m.variables) + list(m.optimizer.variables) + [v for met in m.metrics for v in met.variables]:
+    if id(v) not in seen:
+        seen.add(id(v)); out[v.path] = np.asarray(v.numpy(), "float64").ravel()[:4].round(5).tolist()
+print(json.dumps(out))
+"""
+
+
+def test_jitted_train_step_keeps_every_variable_in_step_with_eager():
+    """Every piece of state the step updates must survive JIT replay — also
+    state whose update does not depend on the batch. On tinygrad 0.14 a
+    Variable assigned from a python scalar stayed a CONST (no buffer to
+    pin): after `Mean.reset_state()` the loss tracker's `count` froze and
+    `fit` reported a loss of 0.0, and Adam's `iteration` froze at the
+    capture, silently changing the trajectory. `make smoke` stayed green
+    through it (its only assert is last loss < first). Found 2026-09-21."""
+    env_off = dict(os.environ, KERAS_TINYGRAD_TRAINER_JIT="0")
+    jit = json.loads(_run(_JIT_STATE))
+    old = dict(os.environ)
+    try:
+        os.environ.update(env_off)
+        eager = json.loads(_run(_JIT_STATE))
+    finally:
+        os.environ.clear()
+        os.environ.update(old)
+    assert jit.keys() == eager.keys()
+    bad = {
+        k: (jit[k], eager[k])
+        for k in jit
+        if not all(abs(a - b) <= 1e-4 * max(1.0, abs(b)) for a, b in zip(jit[k], eager[k]))
+    }
+    assert not bad, f"jit vs eager state diverged: {bad}"
+    assert jit["adam/iteration"] == [12.0] and jit["loss/count"] == [96.0], (jit["adam/iteration"], jit["loss/count"])

@@ -229,6 +229,58 @@ same day were on the accidental 0.14.0 and are void):
   taken on tinygrad 0.14.0; this one is the first on the pinned 0.13.0).
   The exit-time abort above fired after the summary, as expected.
 
+## 2026-09-21 (later) — tinygrad 0.13 → 0.14, owner's decision
+
+Uncommitted, on top of `be50656` (which holds everything in the section
+above). Pin: `tinygrad>=0.14,<0.15`; `.venv`, uv.lock and the referee venv
+follow. What the move broke, smallest blast radius last:
+
+- **ops/numpy dtype leaks (49 referee failures)**: a python scalar is typed
+  `weakint` / `weakfloat` on 0.14 and `int8_tensor + 1.0` comes back typed
+  `weakfloat` — a dtype that exists only in tinygrad's promotion lattice.
+  `_pair` and `clip` had left that promotion to tinygrad; they now cast the
+  tensor operand to keras' own `result_type` first (right on any version).
+- **int tensor ** int tensor**: tinygrad has no integer pow (`# TODO: int
+  pow` in both versions); 0.14 renders the float route as C no compiler
+  accepts (keras' `test_power`). `numpy._int_power`: exact
+  square-and-multiply, numpy's wrap-around, no float — also exact past
+  2**24, where the old route was not.
+- **The vendored exporter**: upstream's v0.13.0..v0.14.0 diff of
+  `extra/export_model.py` (eight hunks: PARAM slots, `is_bound_var`,
+  `prg.src[2]`, `NUM_CPU_THREADS`, AddrSpace-based symbolic vars) applied to
+  `_vendor/export_model.py`. Python-side tests green; the exported bundle
+  RUNNING in a browser is NOT re-verified (`make browser-assets` + the m0
+  experiment is the check — owner's box).
+- **The one that matters — the jitted train step silently froze state.**
+  On 0.14 `.contiguous().realize()` no longer turns a CONST into a buffer,
+  so a Variable assigned from a python scalar had no buffer to pin and was
+  baked into the capture: `Mean.reset_state()` assigns 0 → the loss
+  tracker's `count` froze at the first replay and `fit` reported a loss of
+  exactly 0.0 from epoch 2; Adam's `iteration` (initialized from 0) froze →
+  stale bias correction, a different trajectory. Weights kept training, so
+  NOTHING failed: `make smoke` printed SMOKE OK with losses
+  `[13.2, 0.0, 0.0, 0.0, 0.0]` (its only assert is last < first — worth
+  tightening, owner's call), and the referee had been running on 0.14 by
+  accident since 2026-08-30 without a red test. Fix: `core._concrete`
+  (architecture invariant 5). Receipt:
+  `test_jitted_train_step_keeps_every_variable_in_step_with_eager` — all
+  model / optimizer / metric variables, JIT vs eager. How it was found, for
+  the next bump: diff every variable between `KERAS_TINYGRAD_TRAINER_JIT=1`
+  and `=0` after a 2-epoch Adam fit. Do that FIRST.
+- Unchanged on 0.14 (re-probed): realize / host reads zero the gradients
+  upstream (invariant 12), `JitError` on a host read at capture. Gone on
+  0.14: the tensorflow exit-time abort (referee.sh still tolerates it).
+  New on 0.14: the CPU device runs a worker pool — load average ~20 during
+  a referee run where 0.13 showed ~2; pin with `taskset`.
+
+Receipts (all on tinygrad 0.14.0, final tree): `make verify` **54 passed**;
+`make smoke` (losses 5.80 → 0.64), `make tutorial`, `make vendor-check`,
+`make readme-check` green; ops suites numpy + linalg + math + image
+**3 failed / 6,139 passed / 725 skipped** — the three known (unique,
+vectorize, test_cross), the same totals as on 0.13; layers tree, the tally
+of record, **5 failed / 1,988 passed / 215 skipped / 1 xpassed**, "OK —
+failed set == baseline (5 known)" (0:36:49 on 5 pinned cores).
+
 ## How to run anything
 
 ```sh

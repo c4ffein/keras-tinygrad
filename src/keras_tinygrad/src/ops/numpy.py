@@ -96,20 +96,34 @@ def _dtype_of(x):
     return type(x)
 
 
+def _promoted_for_scalar(x, scalar):
+    """`x` as a tensor of the dtype Keras gives `x <op> python scalar`."""
+    x = convert_to_tensor(x)
+    if isinstance(x, ComplexTensor):
+        return x
+    dtype = result_type(to_keras_dtype(x.dtype), type(scalar))
+    tg_dtype = to_tinygrad_dtype(dtype)
+    return x if x.dtype == tg_dtype else x.cast(tg_dtype)
+
+
 def _pair(x1, x2):
     """Convert a binary-op operand pair, honoring Keras dtype promotion.
 
-    Python scalars stay scalars (tinygrad broadcasts them without changing
-    the tensor operand's dtype, which matches Keras' weak-type behavior).
+    Python scalars stay scalars (weak-typed, like Keras), but the TENSOR
+    operand is first cast to Keras' own `result_type(tensor, type(scalar))`:
+    the promotion is never left to tinygrad. It used to be — on 0.13
+    `int8_tensor + 1.0` came back float32, which happened to be Keras'
+    answer; on 0.14 it comes back typed `weakfloat`, a dtype that exists
+    only inside tinygrad's promotion lattice and maps to no Keras dtype.
     """
     s1 = isinstance(x1, (builtins.int, builtins.float, builtins.bool))
     s2 = isinstance(x2, (builtins.int, builtins.float, builtins.bool))
     if s1 and s2:
         return convert_to_tensor(x1), x2
     if s1:
-        return x1, convert_to_tensor(x2)
+        return x1, _promoted_for_scalar(x2, x1)
     if s2:
-        return convert_to_tensor(x1), x2
+        return _promoted_for_scalar(x1, x2), x2
     dtype = result_type(_dtype_of(x1), _dtype_of(x2))
     return convert_to_tensor(x1, dtype), convert_to_tensor(x2, dtype)
 
@@ -216,9 +230,42 @@ def power(x1, x2):
             )
     a = convert_to_tensor(x1, dtype)
     b = convert_to_tensor(x2, dtype)
-    out = a**b
     tg_dtype = to_tinygrad_dtype(dtype)
+    if "int" in dtype:
+        return _int_power(a, b, tg_dtype)
+    out = a**b
     return out.cast(tg_dtype) if out.dtype != tg_dtype else out
+
+
+def _int_power(a, b, tg_dtype):
+    """Exact integer power (square-and-multiply), wrapping like numpy.
+
+    tinygrad has no integer pow (`# TODO: int pow` in both 0.13 and 0.14):
+    an int tensor exponent goes through the FLOAT `POW`. 0.13 happened to
+    render that as C that compiled and the old code rounded it back; 0.14's
+    vectorized renderer emits an int-vector store of a float vector, which
+    no C compiler accepts (keras' own test_power). Integer arithmetic is
+    also exact beyond 2**24, where the float32 route was not.
+
+    One `where` per exponent bit, a kernel barrier every 8 bits to bound the
+    rendered expression. Not differentiable, like any integer op. Negative
+    exponents (numpy raises; a lazy exponent cannot be checked, see the
+    caller) keep the truncate-toward-zero result of the float route:
+    1 -> 1, -1 -> +-1, everything else 0.
+    """
+    bits = tg_dtype.itemsize * 8 - (0 if "uint" in to_keras_dtype(tg_dtype) else 1)
+    result = Tensor.ones(*a.shape, dtype=tg_dtype) * (b * 0 + 1)  # broadcast shape
+    base, e = a * (b * 0 + 1), b * (a * 0 + 1)
+    for i in range(bits):
+        result = ((e >> i) & 1).ne(0).where(result * base, result)
+        base = base * base
+        if i % 8 == 7:
+            result, base = result.contiguous(), base.contiguous()
+    if "uint" not in to_keras_dtype(tg_dtype):
+        a_b = a * (b * 0 + 1)
+        negative = (a_b == 1).where(1, (a_b == -1).where((b & 1).ne(0).where(-1, 1), 0))
+        result = (b < 0).where(negative, result)
+    return result.cast(tg_dtype) if result.dtype != tg_dtype else result
 
 
 def mod(x1, x2):
@@ -1077,14 +1124,24 @@ def trunc(x):
 
 def clip(x, x_min, x_max):
     x = convert_to_tensor(x)
+    # numpy reference: the result has x's dtype (bool -> int32), whatever
+    # the bounds are. Stated here rather than left to tinygrad's promotion:
+    # on 0.14 `bool_tensor.clip(1, 2)` comes back typed `weakint`.
+    dtype = to_keras_dtype(x.dtype)
+    if dtype == "bool":
+        dtype = "int32"
+        x = x.cast(to_tinygrad_dtype(dtype))
+    tg_dtype = to_tinygrad_dtype(dtype)
     if isinstance(x_min, Tensor) or isinstance(x_max, Tensor):
-        return x.maximum(x_min).minimum(x_max)
-    # tinygrad's ufix refuses numpy scalars (np.float32(...)) as bounds.
-    if isinstance(x_min, np.generic):
-        x_min = x_min.item()
-    if isinstance(x_max, np.generic):
-        x_max = x_max.item()
-    return x.clip(x_min, x_max)
+        out = x.maximum(x_min).minimum(x_max)
+    else:
+        # tinygrad's ufix refuses numpy scalars (np.float32(...)) as bounds.
+        if isinstance(x_min, np.generic):
+            x_min = x_min.item()
+        if isinstance(x_max, np.generic):
+            x_max = x_max.item()
+        out = x.clip(x_min, x_max)
+    return out if out.dtype == tg_dtype else out.cast(tg_dtype)
 
 
 # ---- shape manipulation -----------------------------------------------------

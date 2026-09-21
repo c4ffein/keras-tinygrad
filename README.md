@@ -53,7 +53,7 @@ that page is executed by CI, so it cannot rot.
 Works against the stock PyPI `keras` wheel (3.15.x — 3.15.1 is the version
 of record: the full test tally below, the loader test suite and the
 executable tutorial, training included, all run against it; 3.15.0's
-patch anchors are verified by the loader suite) and `tinygrad` 0.13; the
+patch anchors are verified by the loader suite) and `tinygrad` 0.14; the
 dependency pin says the same thing (`keras>=3.15,<3.16`). On any other Keras version
 the import fails loudly at the anchor check — see below.
 The only rule: `import keras_tinygrad` **before** `import keras` (importing it
@@ -99,7 +99,7 @@ Verified against Keras' own test suite, per-op:
   losses 166/166, RNN layers (incl. default Orthogonal init) via the
   generic scan, attention (flash accepted as a hint), CTC with beam search,
   image ops (all five resize interpolations, antialias included).
-- Training uses tinygrad 0.13's explicit `loss.gradient()` — gradients are
+- Training uses tinygrad's explicit `loss.gradient()` — gradients are
   pure outputs, no tape bookkeeping; `custom_gradient` honored via the
   trainer's tape (quantized training works).
 - int8 / int4 / float8 quantization working.

@@ -624,7 +624,7 @@ def _cut_all(*carried):
     constants — 75 clang compiles per call shape), whereas one stacked
     buffer per segment gives identical segment graphs that the kernel
     cache compiles once. (`realize()` would be cheaper still, but the
-    gradient does not flow through realized tensors in tinygrad 0.13.)
+    gradient does not flow through realized tensors in tinygrad 0.13/0.14.)
     """
     stacked = Tensor.stack(*carried).contiguous().contiguous_backward()
     return [stacked[i] for i in range(len(carried))]

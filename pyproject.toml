@@ -27,10 +27,13 @@ classifiers = [
 dependencies = [
     "keras>=3.15,<3.16",
     # Upper-bounded like keras: the trainer's JIT safety story is built on
-    # 0.13 internals (JitError-on-capture semantics, loss.gradient API);
-    # tinygrad is pre-1.0 and breaks APIs freely, and a semantic change
-    # would surface at runtime, not import. Bump only with a referee re-run.
-    "tinygrad>=0.13,<0.14",
+    # tinygrad internals (JitError-on-capture semantics, loss.gradient API,
+    # what `.contiguous().realize()` turns a CONST into); tinygrad is
+    # pre-1.0 and breaks APIs freely, and a semantic change surfaces at
+    # runtime, not import — 0.13 -> 0.14 silently froze every Variable
+    # assigned from a python scalar inside the jitted train step. Bump only
+    # with a referee re-run AND tests/test_backend_regressions.py green.
+    "tinygrad>=0.14,<0.15",
     "numpy",
 ]
 

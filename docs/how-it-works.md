@@ -72,7 +72,7 @@ stubs stay loud.
 
 **Training.** The trainer plumbs data like the numpy backend (plain
 `EpochIterator`, numpy batches converted per step) and takes gradients like
-the torch backend — expressed through tinygrad 0.13's explicit
+the torch backend — expressed through tinygrad's explicit
 `loss.gradient(*tensors)` API. No `zero_grad` bookkeeping: gradients are
 pure outputs, applied by Keras' backend-agnostic
 `optimizer.apply(grads, variables)`. Quantized layers (int8 / int4) record

@@ -183,7 +183,13 @@ tape opener; symbolic build / predict / evaluate see passthrough behavior.
    model input and a returned tensor.
 4. **Copy-on-convert.** Every numpy buffer entering a Tensor is copied,
    because tinygrad wraps zero-copy and reads lazily.
-5. **Variables realize on assign**; long tensor loops bound their lazy graphs
+5. **Variables realize on assign and OWN A BUFFER** (`core._concrete`): a
+   const-backed Variable has nothing for the train-step JIT to pin, its
+   value is baked into the capture and every later update is lost in
+   replay. tinygrad 0.14 no longer turns a CONST into a buffer through
+   `.contiguous().realize()`, which froze `Mean.count` and Adam's
+   `iteration` silently (receipt: `test_jitted_train_step_keeps_every_
+   variable_in_step_with_eager`). Long tensor loops bound their lazy graphs
    explicitly. A lazy graph must never outlive the buffers it reads.
 6. **Monkeypatches are a closed, minimal set** — `Tensor.__bool__`,
    `__array__`, `__float__`, `__int__`, `__index__` and `DType.__str__`
@@ -209,7 +215,7 @@ tape opener; symbolic build / predict / evaluate see passthrough behavior.
 11. Every keras-core touchpoint has an anchor in the loader's patch table —
     added in the same change that creates the touchpoint.
 12. **A differentiable op never realizes anything on the path to what it
-    returns.** tinygrad 0.13 replaces a realized tensor's graph with its
+    returns.** tinygrad (0.13 and 0.14, re-probed) replaces a realized tensor's graph with its
     buffer and `Tensor.gradient` then returns ZEROS upstream of it, without
     an error; a host read (`.item()`, `convert_to_numpy`) does the same to
     every `.contiguous()` node upstream of the value it reads. Loops bound
@@ -227,7 +233,7 @@ tape opener; symbolic build / predict / evaluate see passthrough behavior.
 - **The train step is TinyJit-compiled; everything else stays eager.**
   One capture per batch signature (partial final batch = its own capture);
   weight propagation via pinned buffers (in-place `Tensor.assign`, the
-  tinygrad-optimizer pattern). The safety story: tinygrad 0.13 raises
+  tinygrad-optimizer pattern). The safety story: tinygrad (0.13, re-checked on 0.14) raises
   `JitError` on any host data access during capture, so every freeze
   hazard (host RNG, `.item()`, `ops.cond` schedules) fails loudly at
   capture and the trainer falls back to eager with a warning. Static

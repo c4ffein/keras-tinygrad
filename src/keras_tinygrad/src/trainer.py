@@ -2,7 +2,7 @@
 
 Data plumbing follows the numpy backend (plain `EpochIterator`, batches
 arrive as numpy arrays and are converted per step); the gradient step
-follows the torch backend, expressed through tinygrad 0.13's explicit
+follows the torch backend, expressed through tinygrad's explicit
 `loss.gradient(*tensors)` API — no zero_grad bookkeeping, the gradients
 are pure outputs. Keras' backend-agnostic optimizers then apply them via
 `optimizer.apply(grads, variables)`.

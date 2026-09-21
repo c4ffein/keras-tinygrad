@@ -4,7 +4,7 @@ from typing import Dict, List, Optional, Tuple
 
 from tinygrad.codegen import to_program
 from tinygrad.device import Buffer, Device
-from tinygrad.dtype import DType, dtypes
+from tinygrad.dtype import AddrSpace, DType, dtypes
 from tinygrad.engine.jit import TinyJit
 from tinygrad.helpers import Context, prod, to_mv
 from tinygrad.nn.state import get_state_dict
@@ -34,7 +34,7 @@ def compile_net(
     def name_of(bu: UOp, is_out: bool) -> str:
         nonlocal n
         if bu.op is Ops.PARAM:
-            key, name, size = ("in", bu.arg), f"input{bu.arg}", prod(bu.shape) * bu.dtype.itemsize
+            key, name, size = ("in", bu.arg.slot), f"input{bu.arg.slot}", prod(bu.shape) * bu.dtype.itemsize
         else:
             b = bu.buffer
             key, size = (id(b.base), b.offset, b.size, b.dtype), b.size * b.dtype.itemsize
@@ -48,13 +48,11 @@ def compile_net(
         return name
 
     for call in iter_kernel_calls(linear):
-        arg_uops = [b for b in call.src[1:] if b.op is not Ops.BIND]
+        arg_uops = [b for b in call.src[1:] if not b.is_bound_var]
         prg = to_program(call.src[0], Device[arg_uops[0].device].renderer)
         info = prg.arg
-        functions[info.function_name] = prg.src[3].arg
-        cargs = [name_of(bu, i == 0) for i, bu in enumerate(arg_uops)] + [
-            v for v in info.vars if v.op is Ops.DEFINE_VAR
-        ]
+        functions[info.function_name] = prg.src[2].arg
+        cargs = [name_of(bu, i == 0) for i, bu in enumerate(arg_uops)] + list(info.vars)
         statements.append((info.function_name, cargs, info.global_size, info.local_size))
 
     return functions, statements, {name: (size, dtype, key) for name, size, dtype, key in bufs.values()}, bufs_to_save
@@ -377,8 +375,8 @@ export default {model_name};
 def export_model(model, target: str, *inputs, model_name: Optional[str] = "model", stream_weights=False):
     assert Device.DEFAULT in EXPORT_SUPPORTED_DEVICE, f"only {', '.join(EXPORT_SUPPORTED_DEVICE)} are supported"
 
-    # NOTE: CPU_COUNT=1, since export does not support threading
-    with Context(JIT=2, CPU_COUNT=1):
+    # NOTE: NUM_CPU_THREADS=1, since export does not support threading
+    with Context(JIT=2, NUM_CPU_THREADS=1):
         linear, output_bufs = jit_model(model, *inputs)
     functions, statements, bufs, bufs_to_save = compile_net(linear, output_bufs)
     state = get_state_dict(model)
@@ -393,12 +391,12 @@ def export_model(model, target: str, *inputs, model_name: Optional[str] = "model
     for i, (_, args, global_size, _) in enumerate(statements):
         for j, var in enumerate(args):
             if (
-                getattr(var, "op", None) is Ops.DEFINE_VAR
-                and isinstance(getattr(var, "arg", None), tuple)
-                and isinstance(var.arg[0], str)
+                getattr(var, "op", None) is Ops.PARAM
+                and var.addrspace is AddrSpace.ALU
+                and var.arg.name is not None
             ):
                 if var not in symbolic_vars:
-                    symbolic_vars[var] = var.arg[0]
+                    symbolic_vars[var] = var.expr
                     bufs[symbolic_vars[var]] = (var.dtype.itemsize, var.dtype, symbolic_vars[var])
                 statements[i][1][j] = symbolic_vars[var]
 
@@ -407,10 +405,11 @@ def export_model(model, target: str, *inputs, model_name: Optional[str] = "model
                 if (
                     getattr(dim, "op", None) is Ops.ADD
                     and len(dim.src) == 2
-                    and {dim.src[0].op, dim.src[1].op} == {Ops.DEFINE_VAR, Ops.CONST}
+                    and any(s.op is Ops.PARAM and s.addrspace is AddrSpace.ALU for s in dim.src)
+                    and any(s.op is Ops.CONST for s in dim.src)
                 ):
                     name, val = dim.src if dim.src[1].op is Ops.CONST else reversed(dim.src)
-                    global_size[j] = f"_{name.arg[0]}[0] + {val.arg}"
+                    global_size[j] = f"_{name.expr}[0] + {val.val}"
 
     prg = ""
     if target == "clang":
