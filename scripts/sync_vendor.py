@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Loader patch-anchor check (formerly also a vendor sync).
 
-The backend sources under ``src/keras_tinygrad/_backend/`` ARE the source
+The backend sources under ``src/keras_tinygrad/src/`` ARE the source
 of truth (since 2026-08-30; before that they were a snapshot of a sibling
 keras clone, and this tool copied them across).  What remains is the one
 check that needs no clone:
@@ -20,7 +20,6 @@ import os
 import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-VENDORED_DIR = os.path.join(REPO_ROOT, "src", "keras_tinygrad", "_backend")
 LOADER_PATH = os.path.join(REPO_ROOT, "src", "keras_tinygrad", "_loader.py")
 
 

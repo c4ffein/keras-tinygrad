@@ -64,7 +64,7 @@ The load-bearing piece is `KerasTrainStep` in `m0.py` — the shape any future
 `keras_tinygrad.export_train_step(model, optimizer, loss)` API should
 generalize:
 
-1. **Pinning** (from `_backend/trainer.py`'s `_TrainStepJit`): Keras
+1. **Pinning** (from `keras_tinygrad/src/trainer.py`'s `_TrainStepJit`): Keras
    Variables rebind `_value` on every assign; inside the traced call, copy
    each new value back into the buffer the capture read (in-place
    `Tensor.assign`) and repoint `_value`. That turns Keras' functional

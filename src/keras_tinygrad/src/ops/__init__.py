@@ -1,16 +1,13 @@
-"""Protocol `ops` namespace (keras calls `backend.ops.is_tensor`,
-`backend.ops.numpy.where`, ...). Aggregates the existing flat `_backend`
-modules into the pluggable-era layout without moving them; the real
-restructure replaces this shim (docs/upstream/keras-plugin-poc.md)."""
+# Star import FIRST, submodules after, as plain `import` statements: `core`
+# has a bare `import math` that the star import (no `__all__`) re-exports
+# as `ops.math`; a later `from keras_tinygrad.src.ops import math` would
+# return that stdlib attribute without loading the submodule, whereas
+# `import keras_tinygrad.src.ops.math` loads it and rebinds the attribute.
+from keras_tinygrad.src.ops.core import *  # noqa: F403
 
-import keras_tinygrad.src  # noqa: F401 -- registers the backend alias
-
-from keras.src.backend.tinygrad import (
-    core,  # noqa: F401
-    image,  # noqa: F401
-    linalg,  # noqa: F401
-    math,  # noqa: F401
-    nn,  # noqa: F401
-    numpy,  # noqa: F401
-)
-from keras.src.backend.tinygrad.core import *  # noqa: F401, F403
+import keras_tinygrad.src.ops.core  # noqa: E402, F401
+import keras_tinygrad.src.ops.image  # noqa: E402, F401
+import keras_tinygrad.src.ops.linalg  # noqa: E402, F401
+import keras_tinygrad.src.ops.math  # noqa: E402, F401
+import keras_tinygrad.src.ops.nn  # noqa: E402, F401
+import keras_tinygrad.src.ops.numpy  # noqa: E402, F401

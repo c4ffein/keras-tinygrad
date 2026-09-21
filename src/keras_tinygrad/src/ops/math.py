@@ -11,10 +11,12 @@ from tinygrad import dtypes as _tg_dtypes
 
 from keras.src.backend import standardize_dtype
 from keras.src.backend.common.dtypes import result_type
-from keras.src.backend.tinygrad.core import convert_to_tensor
-from keras.src.backend.tinygrad.core import to_keras_dtype
-from keras.src.backend.tinygrad.core import to_tinygrad_dtype
-from keras.src.backend.tinygrad.numpy import _float
+from keras_tinygrad.src.ops.core import MissingOpError
+from keras_tinygrad.src.ops.core import convert_to_tensor
+from keras_tinygrad.src.ops.core import to_keras_dtype
+from keras_tinygrad.src.ops.core import to_tinygrad_dtype
+from keras_tinygrad.src.ops.numpy import _dtype_of
+from keras_tinygrad.src.ops.numpy import _float
 from keras.src.utils.module_utils import scipy
 
 
@@ -227,7 +229,7 @@ def segment_prod(data, segment_ids, num_segments=None, sorted=False):
 def logdet(x):
     # numpy-reference semantics: `slogdet(x)[1]`, i.e. log|det(x)| — computed
     # off linalg's det (float64 internally, shape-stable partial pivoting).
-    from keras.src.backend.tinygrad.linalg import det
+    from keras_tinygrad.src.ops.linalg import det
 
     return _float(det(convert_to_tensor(x))).abs().log()
 
@@ -520,9 +522,190 @@ def istft(
     return x[..., start:end]
 
 
+# ---------------------------------------------------------------------------
+# lgamma / gammainc — keras master ops (not in the 3.15.x pin; see the
+# note above `copysign` in numpy.py). Pure Tensor ops, differentiable.
+# ---------------------------------------------------------------------------
+
+# Lanczos approximation (g = 7, n = 9): the same constants as keras'
+# backend-agnostic `_lgamma` (and XLA's lgamma), so the two agree to
+# float32 rounding.
+_LANCZOS_GAMMA = 7.0
+_BASE_LANCZOS_COEFF = 0.99999999999980993227684700473478
+_LANCZOS_COEFFICIENTS = (
+    676.520368121885098567009190444019,
+    -1259.13921672240287047156078755283,
+    771.3234287776530788486528258894,
+    -176.61502916214059906584551354,
+    12.507343278686904814458936853,
+    -0.13857109526572011689554707,
+    9.984369578019570859563e-6,
+    1.50563273514931155834e-7,
+)
+_LOG_SQRT_TWO_PI = (_math.log(2.0) + _math.log(_math.pi)) / 2.0
+_LANCZOS_GAMMA_PLUS_HALF = _LANCZOS_GAMMA + 0.5
+_LOG_LANCZOS_GAMMA_PLUS_HALF = _math.log(_LANCZOS_GAMMA_PLUS_HALF)
+
+
+def _compute_float(x):
+    """(float32-or-float64 working tensor, dtype to cast the result to)."""
+    x = _float(x)
+    out_dtype = x.dtype
+    if out_dtype in (_tg_dtypes.float16, _tg_dtypes.bfloat16):
+        x = x.cast(_tg_dtypes.float32)
+    return x, out_dtype
+
+
+def lgamma(x):
+    x, out_dtype = _compute_float(x)
+    # Euler's reflection for x < 0.5: gamma(x) = pi / (sin(pi x) gamma(1-x)).
+    need_reflect = x < 0.5
+    z = need_reflect.where(-x, x - 1.0)
+    series = None
+    for i, coeff in enumerate(_LANCZOS_COEFFICIENTS):
+        term = coeff / (z + float(i + 1))
+        series = term if series is None else series + term
+    series = series + _BASE_LANCZOS_COEFF
+    t = z + _LANCZOS_GAMMA_PLUS_HALF
+    # Plain log(1 + u), not log1p: the backend's compensated log1p has a
+    # 0/0 gradient at u == 0, i.e. at x == 1 (lgamma'(1) = -euler_gamma).
+    log_t = _LOG_LANCZOS_GAMMA_PLUS_HALF + (z / _LANCZOS_GAMMA_PLUS_HALF + 1.0).log()
+    log_y = _LOG_SQRT_TWO_PI + (z + 0.5 - t / log_t) * log_t + series.log()
+    # The reflection's sin argument reduced to [0, 0.5] so it stays accurate
+    # far from the origin.
+    abs_x = x.abs()
+    abs_frac = abs_x - abs_x.floor()
+    reduced = (abs_frac > 0.5).where(1.0 - abs_frac, abs_frac)
+    # Where the reflection is NOT selected, feed sin a benign argument:
+    # a positive integer x has reduced == 0, log(sin(0)) = -inf, and the
+    # discarded branch's infinite derivative would still poison the
+    # `where` gradient (0 * inf = nan) — lgamma'(3.0) must be digamma(3).
+    reduced = need_reflect.where(reduced, 0.25)
+    reflection_denom = (_math.pi * reduced).sin().log()
+    # At a pole (a non-positive integer) sin is 0 and the log is -inf;
+    # lgamma there is +inf, the negated denominator.
+    finite = (reflection_denom == reflection_denom) & (
+        reflection_denom.abs() != _math.inf
+    )
+    reflection = finite.where(
+        _math.log(_math.pi) - reflection_denom - log_y, -reflection_denom
+    )
+    out = need_reflect.where(reflection, log_y)
+    # scipy.special.gammaln (the numpy-backend reference): +inf -> +inf,
+    # -inf -> -inf.
+    out = (abs_x == _math.inf).where(x, out)
+    return out.cast(out_dtype)
+
+
+# Numerical Recipes' pair for P(a, x): the series for x < a + 1, the
+# (modified Lentz) continued fraction of Q = 1 - P otherwise. Both run a
+# FIXED number of terms (shape-stable lazy graph, differentiable in a and
+# x) and are selected with `where`, so every element pays both branches.
+# The counts are what float32 needs (< 5e-7 relative) for shape
+# parameters up to ~1000 at the worst case x ~ a + 1 (measured against
+# scipy in a numpy emulation: series 20 / 60 / 100 / 200 terms for a <=
+# 10 / 100 / 300 / 1000, the fraction 20 / 20 / 40 / 60); larger `a`
+# loses accuracy near x ~ a. Float32 cancellation in the log prefactor
+# costs ~1e-5 relative from a ~ 50 up regardless.
+_GAMMAINC_SERIES_ITERS = 200
+_GAMMAINC_CF_ITERS = 60
+_GAMMAINC_CUT = 20  # iterations per segment (see `_cut_all`)
+_GAMMAINC_FPMIN = 1e-30
+
+
+def _cut_all(*carried):
+    """Segment barrier on the loop-CARRIED values, in BOTH directions.
+
+    The unrolled recurrences would otherwise render (forward, and again in
+    the gradient pass) as one C expression nested past clang's 256-bracket
+    limit. The values are STACKED into one buffer first: cut one by one,
+    the scheduler materializes every intermediate that two of them share
+    (each iteration became its own kernel, with its own baked-in
+    constants — 75 clang compiles per call shape), whereas one stacked
+    buffer per segment gives identical segment graphs that the kernel
+    cache compiles once. (`realize()` would be cheaper still, but the
+    gradient does not flow through realized tensors in tinygrad 0.13.)
+    """
+    stacked = Tensor.stack(*carried).contiguous().contiguous_backward()
+    return [stacked[i] for i in range(len(carried))]
+
+
+def gammainc(x1, x2):
+    dtype = result_type(_dtype_of(x1), _dtype_of(x2), float)
+    a, out_dtype = _compute_float(convert_to_tensor(x1, dtype))
+    x, _ = _compute_float(convert_to_tensor(x2, dtype))
+    # Broadcast up front (static shapes): the carried values are stacked,
+    # so they must share one shape. Not `a + x * 0.0`: inf * 0 is nan, and
+    # it would sit in a's graph.
+    shape = tuple(np.broadcast_shapes(tuple(a.shape), tuple(x.shape)))
+    a_in, x_in = a.expand(shape), x.expand(shape)
+    # The domain edges (x = 0, x = inf, a = 0, anything negative) get their
+    # values assigned at the end. The expansions must not SEE them: log(0)
+    # and inf - inf are nan in the graph, and a nan in a branch `where`
+    # discards still poisons the gradient (0 * nan) — of that element, and
+    # through a broadcast `a` of every element. They run on an interior
+    # point there instead, so the gradient at an edge is exactly 0.
+    edge = (x_in == _math.inf) | (x_in <= 0.0) | (a_in <= 0.0)
+    a, x = edge.where(1.0, a_in), edge.where(1.0, x_in)
+    gln = lgamma(a)
+    # Each branch sees x clamped to its own convergence region, so the
+    # branch `where` discards is finite too (a nan there would poison the
+    # gradient of the selected one: d(where)/dx multiplies by 0, not
+    # nan * 0).
+    boundary = a + 1.0
+    xs = x.minimum(boundary)
+    xc = x.maximum(boundary)
+    # log(x^a e^-x / Gamma(a)), the prefactor of both expansions.
+    log_pre_s = a * xs.log() - xs - gln
+    log_pre_c = a * xc.log() - xc - gln
+    # Series: sum_n x^n / (a (a+1) ... (a+n)).
+    ap = a
+    d = 1.0 / a
+    s = d
+    for i in range(1, _GAMMAINC_SERIES_ITERS + 1):
+        ap = ap + 1.0
+        d = d * xs / ap
+        s = s + d
+        if i % _GAMMAINC_CUT == 0:
+            ap, d, s = _cut_all(ap, d, s)
+    gser = s * log_pre_s.exp()
+    # Continued fraction (Lentz's method with the tiny-value guards). The
+    # iteration index is a CARRIED tensor, not a python constant baked into
+    # each unrolled step, so the segments stay identical graphs.
+    b = xc + 1.0 - a
+    c = 1.0 / _GAMMAINC_FPMIN
+    d = 1.0 / b
+    h = d
+    i_t = Tensor.zeros_like(a)
+    for i in range(1, _GAMMAINC_CF_ITERS + 1):
+        i_t = i_t + 1.0
+        an = -i_t * (i_t - a)
+        b = b + 2.0
+        d = an * d + b
+        d = (d.abs() < _GAMMAINC_FPMIN).where(_GAMMAINC_FPMIN, d)
+        c = b + an / c
+        c = (c.abs() < _GAMMAINC_FPMIN).where(_GAMMAINC_FPMIN, c)
+        d = 1.0 / d
+        h = h * d * c
+        if i % _GAMMAINC_CUT == 0:
+            b, c, d, h, i_t = _cut_all(b, c, d, h, i_t)
+    gcf = log_pre_c.exp() * h
+    out = (x < boundary).where(gser, 1.0 - gcf)
+    # scipy.special.gammainc's edges: x = +inf -> 1, x = 0 -> 0, a = 0 with
+    # x > 0 -> 1; a = x = 0, or a negative a or x, is nan.
+    out = (x_in == _math.inf).where(1.0, out)
+    out = (x_in == 0.0).where(0.0, out)
+    out = ((a_in == 0.0) & (x_in > 0.0)).where(1.0, out)
+    out = ((a_in == 0.0) & (x_in == 0.0)).where(_math.nan, out)
+    out = ((a_in < 0.0) | (x_in < 0.0)).where(_math.nan, out)
+    return out.cast(out_dtype)
+
+
 def __getattr__(name):
     if name.startswith("__") and name.endswith("__"):
         raise AttributeError(name)
-    raise NotImplementedError(
+    # NotImplementedError AND AttributeError: loud when called, absent when
+    # probed with hasattr (see core.MissingOpError).
+    raise MissingOpError(
         f"tinygrad backend: `keras.ops.{name}` is not implemented yet"
     )

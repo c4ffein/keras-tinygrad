@@ -23,9 +23,9 @@ import numpy as np
 from tinygrad import Tensor
 
 from keras.src.backend.config import floatx
-from keras.src.backend.tinygrad.core import convert_to_numpy
-from keras.src.backend.tinygrad.core import convert_to_tensor
-from keras.src.backend.tinygrad.core import to_tinygrad_dtype
+from keras_tinygrad.src.ops.core import convert_to_numpy
+from keras_tinygrad.src.ops.core import convert_to_tensor
+from keras_tinygrad.src.ops.core import to_tinygrad_dtype
 from keras.src.random.seed_generator import SeedGenerator
 from keras.src.random.seed_generator import draw_seed
 from keras.src.random.seed_generator import make_default_seed
@@ -105,7 +105,7 @@ def _use_device_rng(seed):
     keras.random calls outside a train step) and raw-int seeds keep the
     host/numpy path, bit-identical to the reference backend
     (docs/device-rng.md)."""
-    from keras.src.backend.tinygrad.core import device_rng_enabled, in_device_rng_scope
+    from keras_tinygrad.src.ops.core import device_rng_enabled, in_device_rng_scope
 
     if not (device_rng_enabled() and in_device_rng_scope()):
         return False

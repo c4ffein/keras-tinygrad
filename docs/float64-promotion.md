@@ -29,7 +29,7 @@ except tensorflow — `keras/src/backend/common/dtypes.py:240`:
 ```
 
 Our `convert_to_tensor` routes implicit dtypes through that `result_type`
-(`_backend/core.py`), so float64 inputs compute in float32 — exactly what
+(`src/ops/core.py`), so float64 inputs compute in float32 — exactly what
 the jax backend does with x64 disabled (the policy Keras' lattice is
 documented to match: "attempts to match `jnp.result_type`").
 

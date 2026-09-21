@@ -6,8 +6,8 @@ This product includes software derived from Keras
 Copyright 2015-present, the Keras authors and Google LLC,
 licensed under the Apache License, Version 2.0.
 
-In particular, the vendored backend sources under
-src/keras_tinygrad/_backend/ are derived from the Keras project; several
+In particular, the backend sources under
+src/keras_tinygrad/src/ are derived from the Keras project; several
 modules are ports of the implementations in Keras's numpy backend
 (keras/src/backend/numpy/).
 

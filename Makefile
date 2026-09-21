@@ -16,13 +16,17 @@ endif
 ## verify: the pre-review gate — lint + format + fast tests
 verify: lint-check format-check tests-fast
 
+# The backend sources are excluded from lint/format (keras style, kept
+# byte-stable), which also hides a dropped import until the op is called:
+# undefined names only, and --isolated so the exclusion does not apply.
 lint-check:
 	$(UV) run --group dev ruff check .
+	$(UV) run --group dev ruff check --isolated --select F821 src/keras_tinygrad/src
 
 format-check:
 	$(UV) run --group dev ruff format --check .
 
-## format: apply formatting + safe lint fixes (never touches _backend/)
+## format: apply formatting + safe lint fixes (never touches keras_tinygrad/src/)
 format:
 	$(UV) run --group dev ruff format .
 	$(UV) run --group dev ruff check --fix .
@@ -59,13 +63,13 @@ vendor-check:
 ## record, ~25 min). Clones the pinned keras tag into .referee/ itself and
 ## compares the FAILED set to scripts/referee-baseline.txt.
 referee:
-	scripts/referee.sh
+	bash scripts/referee.sh
 
 ## referee-quick: ~1 min slice of the same suite (backend/optimizer/core ops
 ## + Dense) — catches a broken convert_to_tensor/Variable/SGD in seconds.
 ## Not a tally: baseline-known failures stay green, any other failure is red.
 referee-quick:
-	scripts/referee.sh keras/src/backend/tests keras/src/optimizers/sgd_test.py \
+	bash scripts/referee.sh keras/src/backend/tests keras/src/optimizers/sgd_test.py \
 	  keras/src/ops/core_test.py keras/src/layers/core/dense_test.py
 
 ## readme-check: the README's tally/matrix numbers are internally consistent

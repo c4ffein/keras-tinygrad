@@ -6,11 +6,28 @@ singular values) so the tensor shapes are identical on every step of the
 python loops. Everything is computed internally in float64 (supported by the
 CPU jit) and cast back to the input's float dtype at the end.
 
-Host-side `.item()` reads appear ONLY on error-raising / control paths (the
-non-positive-definite check in `cholesky`, the symmetry gate in `eig`) —
-never on a value that flows into a returned tensor, so no gradient path is
-detached. Loop bodies call `.contiguous()` (and `.realize()` in the pivoted
-eliminations, see comments) to bound the lazy-graph size.
+Gradients and realization (tinygrad 0.13): once a tensor is realized its
+graph is replaced by the buffer, and `Tensor.gradient` then returns ZEROS
+for everything upstream of it — silently. That holds for `.realize()`, and
+equally for a host read (`.item()`) of anything DOWNSTREAM of a
+`.contiguous()` node, which materializes that node. So nothing on the path
+to a returned tensor is ever realized here:
+
+- loop bodies bound the kernel size with `_cut` (`.contiguous()` plus
+  `.contiguous_backward()`, a barrier in both directions), not `.realize()`.
+  ONE exception, because a lazy graph is not free: a Jacobi iteration
+  longer than `_JACOBI_LAZY_ROUNDS` realizes per round — those results
+  carry no gradient, and inside a train step that case raises;
+- the host-side checks (non-positive-definite in `cholesky`, the symmetry
+  gate in `eig`, Jacobi convergence) read a SIDE graph rebuilt from the
+  detached input (`_host_checks_enabled` / the `*_iter` helpers), and are
+  skipped entirely under the trainer's gradient tape, like the jax
+  backend's eager-only cholesky check: a host read there would also
+  materialize whatever `.contiguous()` nodes the CALLER's graph holds
+  upstream of the input, and it would knock the train step out of the JIT.
+
+Receipts: tests/test_backend_regressions.py (linalg gradients against
+analytic references / finite differences).
 
 `jvp` is forward mode built from two reverse-mode passes (see its docstring).
 """
@@ -21,9 +38,11 @@ import warnings
 from tinygrad import Tensor
 from tinygrad import dtypes
 
-from keras.src.backend.tinygrad.core import convert_to_tensor
-from keras.src.backend.tinygrad.core import to_keras_dtype
-from keras.src.backend.tinygrad.numpy import _float
+from keras_tinygrad.src.ops.core import MissingOpError
+from keras_tinygrad.src.ops.core import convert_to_tensor
+from keras_tinygrad.src.ops.core import in_custom_gradient_tape
+from keras_tinygrad.src.ops.core import to_keras_dtype
+from keras_tinygrad.src.ops.numpy import _float
 
 _F64 = dtypes.float64
 # Machine epsilons keyed by keras float dtype (used for default svd cutoffs).
@@ -39,6 +58,47 @@ def _prep(x):
     """Return (float64 working copy, tinygrad dtype to cast results back to)."""
     x = _float(convert_to_tensor(x))
     return x.cast(_F64), x.dtype
+
+
+def _cut(x):
+    """Kernel barrier for a loop-carried value, in BOTH directions, that
+    keeps the autograd graph (`.realize()` does not — see the module
+    docstring)."""
+    return x.contiguous().contiguous_backward()
+
+
+# The Jacobi iterations (eigh / eig / svd) are sweeps x (n - 1) rotation
+# rounds. Held as ONE lazy graph — what a gradient needs — their cost is
+# superlinear in the round count: svd of (4, n + 4, n) under the trainer's
+# tape, CPU, measured 2026-09-21: n = 4 (30 rounds) 6 s / 0.3 GB, n = 8 (70)
+# 20 s / 0.5 GB, n = 12 (110) 45 s / 0.8 GB; n = 20 (190 rounds, keras'
+# own test_svd) passed 6 GB and, uncapped, stalled an 8-core box. Above this
+# many rounds the iteration realizes per round instead (bounded, the
+# pre-2026-09-21 behavior) and its results carry NO gradient — inside a
+# train step that case raises rather than train on zeros.
+_JACOBI_LAZY_ROUNDS = 110
+
+
+def _jacobi_plan(n, sweeps, what):
+    """(lazy, check): hold the iteration as one differentiable lazy graph?
+    run the host-side convergence check?"""
+    lazy = len(_round_robin_pairs(n)) * sweeps <= _JACOBI_LAZY_ROUNDS
+    check = _host_checks_enabled()
+    if not lazy and not check:
+        raise NotImplementedError(
+            f"tinygrad backend: `{what}` of a {n}-column matrix is not "
+            "differentiable (its Jacobi iteration is too long to hold as "
+            "one lazy graph, and realizing it per round returns zero "
+            "gradients); inside a train step that is an error. Largest "
+            f"supported there: {_JACOBI_LAZY_ROUNDS // sweeps + 1} columns."
+        )
+    return lazy, check
+
+
+def _host_checks_enabled():
+    """Host-side validity checks run in eager use only, never while the
+    trainer is building a differentiated step (module docstring)."""
+    return not in_custom_gradient_tape()
 
 
 def _eps_of(tg_dtype):
@@ -104,8 +164,8 @@ def _qr_householder(a):
         v = x - alpha * ej
         vn2 = (v * v).sum(-2, keepdim=True)
         coef = (vn2 > 0).where(2.0 / (vn2 + (vn2 <= 0).cast(_F64)), 0.0)
-        R = (R - coef * (v @ (v.transpose(-2, -1) @ R))).contiguous()
-        Q = (Q - coef * ((Q @ v) @ v.transpose(-2, -1))).contiguous()
+        R = _cut(R - coef * (v @ (v.transpose(-2, -1) @ R)))
+        Q = _cut(Q - coef * ((Q @ v) @ v.transpose(-2, -1)))
     if Q.ndim < a.ndim:  # loop may not have broadcast Q (e.g. m == 1)
         Q = Q.reshape((1,) * (a.ndim - 2) + (m, m)).expand(
             *a.shape[:-2], m, m
@@ -168,9 +228,9 @@ def _gauss_jordan(a, b):
         colv = M[..., :, i : i + 1]  # (..., n, 1)
         eic = (eic_all == i).cast(_F64)
         # Eliminate column i from every row, then restore the normalized
-        # pivot row. Realize each step to bound the lazy-graph size (this is
-        # an O(n)-step loop of full-matrix updates).
-        M = (M - colv @ rowi + eic * rowi).contiguous().realize()
+        # pivot row. One kernel barrier per step (this is an O(n)-step loop
+        # of full-matrix updates).
+        M = _cut(M - colv @ rowi + eic * rowi)
     return M[..., :, n:]
 
 
@@ -219,9 +279,9 @@ def det(a):
         # untouched so the zero lands on the diagonal and the product is 0.
         f = (U[..., :, i : i + 1] / (piv + zero)) * (1.0 - zero)
         f = f * (colr > i).cast(_F64)
-        # Row operations don't change the determinant; realize per step to
-        # bound the lazy-graph size.
-        U = (U - f @ U[..., i : i + 1, :]).contiguous().realize()
+        # Row operations don't change the determinant; one kernel barrier
+        # per step.
+        U = _cut(U - f @ U[..., i : i + 1, :])
     diag = (U * Tensor.eye(n, dtype=_F64)).sum(-1)  # (..., n)
     return (sgn * diag.prod(-1)).cast(dt)
 
@@ -247,10 +307,10 @@ def lu_factor(a):
         ei_row = (ei_row_all == i).cast(_F64)  # (n,)
         # U-update below row i restricted to columns >= i (columns < i hold
         # the already-stored L multipliers and must stay untouched), then
-        # store this step's L multipliers in column i. Realize per step to
-        # bound the lazy-graph size.
+        # store this step's L multipliers in column i. One kernel barrier
+        # per step.
         mi = M[..., i : i + 1, :] * (ei_row_all >= i).cast(_F64)
-        M = (M - f @ mi + f * ei_row).contiguous().realize()
+        M = _cut(M - f @ mi + f * ei_row)
     piv_out = pivots[0] if k == 1 else pivots[0].cat(*pivots[1:], dim=-1)
     return M.cast(dt), piv_out
 
@@ -260,8 +320,7 @@ def lu_factor(a):
 # ---------------------------------------------------------------------------
 
 
-def cholesky(a, upper=False):
-    a64, dt = _prep(a)
+def _cholesky_factor(a64):
     n = int(a64.shape[-1])
     colr = Tensor.arange(n).reshape(n, 1)
     ecols = Tensor.arange(n)
@@ -275,14 +334,22 @@ def cholesky(a, upper=False):
         below = (colr > j).cast(_F64)
         newcol = (c / sq) * below + sq * ejc
         ejrow = (ecols == j).cast(_F64)  # (n,)
-        L = (L + newcol * ejrow).contiguous()
-    # Host-side validity check (error path only — raising has no gradient
-    # path; sqrt of a negative diagonal produced NaN above).
-    if bool(L.isnan().any().item()):
-        raise ValueError(
-            "Cholesky decomposition failed: the input may not be "
-            "positive definite."
-        )
+        L = _cut(L + newcol * ejrow)
+    return L
+
+
+def cholesky(a, upper=False):
+    a64, dt = _prep(a)
+    # Host-side validity check (error path only; sqrt of a negative
+    # diagonal produces NaN). It reads a side graph built from the detached
+    # input: reading the returned factor itself would zero its gradient.
+    if _host_checks_enabled():
+        if bool(_cholesky_factor(a64.detach()).isnan().any().item()):
+            raise ValueError(
+                "Cholesky decomposition failed: the input may not be "
+                "positive definite."
+            )
+    L = _cholesky_factor(a64)
     out = L.transpose(-2, -1) if upper else L
     return out.cast(dt)
 
@@ -315,7 +382,7 @@ def solve_triangular(a, b, lower=False):
             ..., i : i + 1, i : i + 1
         ]
         eic = (colr == i).cast(_F64)
-        x = (x + eic * xi).contiguous()
+        x = _cut(x + eic * xi)
     if vector:
         x = x.squeeze(-1)
     return x.cast(dt)
@@ -364,8 +431,11 @@ def _jacobi_cs(app, aqq, apq):
     return nz.where(c, 1.0), nz.where(s, 0.0)
 
 
-def _jacobi_eigh(a, sweeps=12):
-    """Cyclic two-sided Jacobi for symmetric `a` (..., n, n) in float64."""
+def _jacobi_eigh_iter(a, sweeps, lazy):
+    """The rotation sweeps: (A, nearly diagonal; V, accumulated rotations).
+    `lazy`: one differentiable graph (`_cut` per round) or realize per round
+    (bounded, no gradient) — see `_JACOBI_LAZY_ROUNDS`."""
+    bound = _cut if lazy else (lambda t: t.contiguous().realize())
     n = int(a.shape[-1])
     A = (a + a.transpose(-2, -1)) * 0.5  # enforce exact symmetry
     V = Tensor.eye(n, dtype=_F64)
@@ -386,22 +456,37 @@ def _jacobi_eigh(a, sweeps=12):
                 apq = A[..., p : p + 1, q : q + 1]
                 c, s = _jacobi_cs(app, aqq, apq)
                 J = J + c * cm + s * sm
-            # Realize per rotation round to bound the lazy-graph size.
-            A = (J.transpose(-2, -1) @ (A @ J)).contiguous().realize()
-            V = (V @ J).contiguous().realize()
+            # One kernel barrier per rotation round.
+            A = bound(J.transpose(-2, -1) @ (A @ J))
+            V = bound(V @ J)
+    return A, V
+
+
+def _jacobi_eigh(a, sweeps=12):
+    """Cyclic two-sided Jacobi for symmetric `a` (..., n, n) in float64."""
+    n = int(a.shape[-1])
+    eye = Tensor.eye(n, dtype=_F64)
     # Convergence loudness: the fixed sweep count converges quadratically
     # at the matrix sizes Keras exercises, but larger or pathologically
     # conditioned inputs would otherwise return silently degraded factors.
-    # Control-path scalar reads only (same precedent as cholesky's NaN gate).
-    off = float((A * (1.0 - eye)).abs().max().item())
-    scale = float(A.abs().max().item())
-    if off > 1e-10 * max(scale, 1.0):
-        warnings.warn(
-            "tinygrad backend: Jacobi eigendecomposition did not fully "
-            f"converge (relative off-diagonal residual {off / max(scale, 1.0):.2e}); "
-            "results may be inaccurate for large or ill-conditioned "
-            "matrices."
-        )
+    # Control-path scalar reads, on a side graph (same rule as cholesky's
+    # NaN gate: reading the returned factors would zero their gradient).
+    lazy, check = _jacobi_plan(n, sweeps, "eigh")
+    A, V = _jacobi_eigh_iter(a, sweeps, lazy)
+    if check:
+        # A lazy result must not be read (that would zero its gradient):
+        # the side graph is the same iteration on the detached input,
+        # realized per round. A realized result is read directly.
+        A_chk = _jacobi_eigh_iter(a.detach(), sweeps, False)[0] if lazy else A
+        off = float((A_chk * (1.0 - eye)).abs().max().item())
+        scale = float(A_chk.abs().max().item())
+        if off > 1e-10 * max(scale, 1.0):
+            warnings.warn(
+                "tinygrad backend: Jacobi eigendecomposition did not fully "
+                f"converge (relative off-diagonal residual {off / max(scale, 1.0):.2e}); "
+                "results may be inaccurate for large or ill-conditioned "
+                "matrices."
+            )
     if V.ndim < a.ndim:
         V = V.reshape((1,) * (a.ndim - 2) + (n, n)).expand(
             *a.shape[:-2], n, n
@@ -431,8 +516,18 @@ def eig(a):
     # Host-side symmetry gate (error path only; the values read here never
     # flow into a result). General non-symmetric eigendecomposition needs
     # complex arithmetic, which tinygrad does not provide.
-    scale = float(a64.abs().max().item())
-    asym = float((a64 - a64.transpose(-2, -1)).abs().max().item())
+    # Under the trainer's tape the gate cannot run (no host reads there),
+    # and without it a non-symmetric input would silently get the
+    # eigenvalues of its symmetric part: loud instead.
+    if not _host_checks_enabled():
+        raise NotImplementedError(
+            "tinygrad backend: `eig` is not available inside a train step "
+            "(its symmetry gate needs a host read, which would zero the "
+            "gradients upstream); use `eigh` for symmetric matrices."
+        )
+    chk = a64.detach()
+    scale = float(chk.abs().max().item())
+    asym = float((chk - chk.transpose(-2, -1)).abs().max().item())
     if asym > 1e-9 * max(scale, 1.0):
         raise NotImplementedError(
             "tinygrad backend: `eig` is only implemented for symmetric "
@@ -443,12 +538,10 @@ def eig(a):
     return w.cast(dt), V.cast(dt)
 
 
-def _svd_jacobi(a, want_uv=True, sweeps=10):
-    """One-sided Jacobi SVD of tall `a` (..., m, n), m >= n, in float64.
-
-    Returns (U (..., m, n), s (..., n) descending, V (..., n, n)); the
-    columns of `a` are orthogonalized by right rotations accumulated in V.
-    """
+def _svd_jacobi_iter(a, want_uv, sweeps, lazy):
+    """The rotation sweeps: (A with orthogonal columns; V, the rotations).
+    `lazy`: as in `_jacobi_eigh_iter`."""
+    bound = _cut if lazy else (lambda t: t.contiguous().realize())
     n = int(a.shape[-1])
     A = a
     V = Tensor.eye(n, dtype=_F64)
@@ -470,22 +563,38 @@ def _svd_jacobi(a, want_uv=True, sweeps=10):
                 apq = G[..., p : p + 1, q : q + 1]
                 c, s = _jacobi_cs(app, aqq, apq)
                 J = J + c * cm + s * sm
-            # Realize per rotation round to bound the lazy-graph size.
-            A = (A @ J).contiguous().realize()
+            # One kernel barrier per rotation round.
+            A = bound(A @ J)
             if want_uv:
-                V = (V @ J).contiguous().realize()
-    # Convergence loudness: see _jacobi_eigh. Columns are orthogonal at
-    # convergence, so the Gram matrix's off-diagonal is the residual.
-    G = A.transpose(-2, -1) @ A
-    off = float((G * (1.0 - eye)).abs().max().item())
-    scale = float(G.abs().max().item())
-    if off > 1e-10 * max(scale, 1.0):
-        warnings.warn(
-            "tinygrad backend: Jacobi SVD did not fully converge "
-            f"(relative off-diagonal residual {off / max(scale, 1.0):.2e}); "
-            "results may be inaccurate for large or ill-conditioned "
-            "matrices."
-        )
+                V = bound(V @ J)
+    return A, V
+
+
+def _svd_jacobi(a, want_uv=True, sweeps=10):
+    """One-sided Jacobi SVD of tall `a` (..., m, n), m >= n, in float64.
+
+    Returns (U (..., m, n), s (..., n) descending, V (..., n, n)); the
+    columns of `a` are orthogonalized by right rotations accumulated in V.
+    """
+    n = int(a.shape[-1])
+    eye = Tensor.eye(n, dtype=_F64)
+    # Convergence loudness: see _jacobi_eigh (side graph, eager use only).
+    # Columns are orthogonal at convergence, so the Gram matrix's
+    # off-diagonal is the residual.
+    lazy, check = _jacobi_plan(n, sweeps, "svd")
+    A, V = _svd_jacobi_iter(a, want_uv, sweeps, lazy)
+    if check:
+        A_chk = _svd_jacobi_iter(a.detach(), False, sweeps, False)[0] if lazy else A
+        G = A_chk.transpose(-2, -1) @ A_chk
+        off = float((G * (1.0 - eye)).abs().max().item())
+        scale = float(G.abs().max().item())
+        if off > 1e-10 * max(scale, 1.0):
+            warnings.warn(
+                "tinygrad backend: Jacobi SVD did not fully converge "
+                f"(relative off-diagonal residual {off / max(scale, 1.0):.2e}); "
+                "results may be inaccurate for large or ill-conditioned "
+                "matrices."
+            )
     s = (A * A).sum(-2).sqrt()  # column norms = singular values
     idx = s.argsort(-1, descending=True)
     P = idx.one_hot(n).cast(_F64)
@@ -784,6 +893,8 @@ def jvp(fun, primals, tangents, has_aux=False):
 def __getattr__(name):
     if name.startswith("__") and name.endswith("__"):
         raise AttributeError(name)
-    raise NotImplementedError(
+    # NotImplementedError AND AttributeError: loud when called, absent when
+    # probed with hasattr (see core.MissingOpError).
+    raise MissingOpError(
         f"tinygrad backend: `keras.ops.linalg.{name}` is not implemented yet"
     )

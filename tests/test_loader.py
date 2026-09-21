@@ -20,6 +20,7 @@ import textwrap
 from keras_tinygrad._loader import _PATCHES, _apply_patches
 
 import pytest
+from _limits import child_limits
 
 TIMEOUT = 300  # keras imports compile a lot on first touch
 
@@ -36,6 +37,7 @@ def run_py(code: str, backend: str | None) -> subprocess.CompletedProcess:
         text=True,
         env=env,
         timeout=TIMEOUT,
+        preexec_fn=child_limits,
     )
 
 
@@ -117,18 +119,28 @@ def test_double_import_is_idempotent():
     assert out.strip() == "1"
 
 
-def test_backend_package_served_from_this_package():
+def test_backend_is_the_plain_keras_tinygrad_src_package():
+    # No alias: the patched dispatch imports `keras_tinygrad.src` itself
+    # (the module keras' pluggable_backend branch resolves), in both the
+    # 3.15.x spelling (`backend.numpy`) and the >= 3.16 one
+    # (`backend.ops.numpy`), and `keras.src.backend.tinygrad` never exists.
     out = check(
         run_py(
             """
+        import sys
         import keras_tinygrad
-        import keras.src.backend.tinygrad as b
-        print(b.__file__)
+        import keras
+        from keras.src import backend
+        import keras_tinygrad.src as b
+        mods = ["core", "image", "linalg", "math", "nn", "numpy"]
+        print(all(getattr(backend, m) is getattr(b.ops, m) is sys.modules[f"keras_tinygrad.src.ops.{m}"] for m in mods))
+        print(backend.Variable.__mro__[1] is b.Variable, keras.Model.__mro__[1] is b.trainer.Trainer)
+        print("keras.src.backend.tinygrad" in sys.modules)
         """,
             backend=None,
         )
     )
-    assert os.path.join("keras_tinygrad", "_backend") in out
+    assert out.splitlines() == ["True", "True True", "False"]
 
 
 # ---------------------------------------------------------------------------

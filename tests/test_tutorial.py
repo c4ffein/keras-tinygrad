@@ -11,6 +11,8 @@ import re
 import subprocess
 import sys
 
+from _limits import child_limits
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TUTORIAL = os.path.join(REPO_ROOT, "TUTORIAL.md")
 
@@ -31,5 +33,6 @@ def test_tutorial_blocks_run():
         text=True,
         env=env,
         timeout=600,
+        preexec_fn=child_limits,
     )
     assert proc.returncode == 0, f"tutorial code failed:\n--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"

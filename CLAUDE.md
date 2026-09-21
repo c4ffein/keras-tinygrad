@@ -1,9 +1,10 @@
 # keras-tinygrad — project instructions
 
 - START by reading HANDOFF.md (state, how to run, decision queue), then
-  docs/architecture.md (the 11 invariants — binding, update in the same diff
+  docs/architecture.md (the 12 invariants — binding, update in the same diff
   that moves a boundary).
-- The backend SOURCE OF TRUTH is src/keras_tinygrad/_backend/ in THIS
+- The backend SOURCE OF TRUTH is src/keras_tinygrad/src/ (the pluggable-
+  backend package shape: ops/ + random/rnn/trainer/layer/export) in THIS
   repo. Nothing here depends on a sibling keras checkout: the referee
   (`make referee`, scripts/referee.sh) clones the pinned keras tag into
   .referee/ itself and runs Keras' tests with the import hook active.

@@ -9,6 +9,8 @@ import subprocess
 import sys
 import textwrap
 
+from _limits import child_limits
+
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
 
@@ -21,6 +23,7 @@ def _run(code, *args):
         env=env,
         cwd=REPO,
         timeout=600,
+        preexec_fn=child_limits,
     )
     assert out.returncode == 0, f"subprocess failed:\n{out.stdout}\n{out.stderr}"
     return out.stdout.strip().splitlines()[-1]
@@ -31,6 +34,7 @@ import os, sys
 import keras_tinygrad
 import numpy as np
 import keras
+
 keras.utils.set_random_seed(0)
 seed = int(sys.argv[1])
 model = keras.Sequential([keras.layers.Input((16,)), keras.layers.Dense(8, activation="relu"),
@@ -69,7 +73,7 @@ def test_assign_of_realized_tensor_schedules_no_copy():
     out = _run("""
 import keras_tinygrad, keras
 import numpy as np
-from keras.src.backend.tinygrad import core
+from keras_tinygrad.src.ops import core
 from tinygrad.helpers import GlobalCounters
 v = core.Variable(initializer=np.zeros((64, 64), dtype="float32"), trainable=True)
 x = core.convert_to_tensor(np.ones((64, 64), dtype="float32")).realize()
@@ -86,7 +90,7 @@ def test_python_scalars_convert_to_const_uops():
     the bundles silently trained plain SGD (m0 README bug #3)."""
     out = _run("""
 import keras_tinygrad, keras
-from keras.src.backend.tinygrad import core
+from keras_tinygrad.src.ops import core
 print(core.convert_to_tensor(0.9).uop.base.op)
 """)
     assert "CONST" in out, f"python scalar became {out}, not a CONST uop"
@@ -157,7 +161,7 @@ def test_seedless_random_op_in_step_jits_and_stays_fresh():
     tinygrad's JitError made that loud and the step fell back to eager.)"""
     out = _run("""
 import keras_tinygrad, keras, numpy as np, json
-from keras.src.backend.tinygrad import trainer as T
+from keras_tinygrad.src import trainer as T
 inst = []
 orig = T._TrainStepJit.__init__
 T._TrainStepJit.__init__ = lambda self, tr: (orig(self, tr), inst.append(self))[0]
@@ -180,8 +184,8 @@ def test_device_rng_accepts_numpy_integer_dims():
     rejects them (exact-class argfix check), so the device path coerces."""
     out = _run("""
 import keras_tinygrad, keras, numpy as np
-from keras.src.backend.tinygrad import random as R
-from keras.src.backend.tinygrad.core import device_rng_scope
+from keras_tinygrad.src import random as R
+from keras_tinygrad.src.ops.core import device_rng_scope
 from tinygrad import Tensor
 with device_rng_scope():
     a = R.normal((np.int64(3),), seed=keras.random.SeedGenerator(1))
@@ -256,3 +260,96 @@ print(json.dumps({"errors": errors, "labels": labels, "kernels": meta["kernels"]
     )
     got = json.loads(out)
     assert got == {"errors": [True, True], "labels": [[1], "float32"], "kernels": True}, got
+
+
+def test_linalg_gradients_are_not_silently_zero():
+    """tinygrad 0.13 returns ZERO gradients through a realized tensor, and a
+    host read (`.item()`) realizes every `.contiguous()` node upstream of it.
+    linalg's loops called `.realize()` per step and its validity checks read
+    the returned factors: inv / det / solve / cholesky / eigh / svd / lstsq
+    all differentiated to exact zeros (found 2026-09-21). Each op's gradient
+    is checked against finite differences of the numpy reference."""
+    out = _run("""
+import json, warnings
+import keras_tinygrad, keras
+import numpy as np
+from tinygrad import Tensor
+from tinygrad.helpers import GlobalCounters
+from keras_tinygrad.src.ops import core, linalg
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(0)
+B = rng.normal(size=(3, 3)); A0 = (B @ B.T + 3 * np.eye(3)).astype("float32")
+R0 = rng.normal(size=(4, 3)).astype("float32"); b0 = rng.normal(size=(3, 2)).astype("float32")
+W = rng.normal(size=(8, 8))
+def w(a): return W[: a.shape[0], : a.shape[1]] if a.ndim == 2 else W[0, : a.shape[0]]
+def sym(X): return (X + X.T) / 2
+def fd(f, X, h=1e-3):
+    X = X.astype("float64"); g = np.zeros_like(X)
+    for i in np.ndindex(*X.shape):
+        P = X.copy(); P[i] += h; M = X.copy(); M[i] -= h
+        g[i] = (f(P) - f(M)) / (2 * h)
+    return g
+b64 = b0.astype("float64")
+cases = {
+    "inv": (A0, linalg.inv, np.linalg.inv),
+    "det": (A0, lambda A: linalg.det(A).reshape(1), lambda X: np.array([np.linalg.det(X)])),
+    "solve": (A0, lambda A: linalg.solve(A, Tensor(b0)), lambda X: np.linalg.solve(X, b64)),
+    "cholesky": (A0, lambda A: linalg.cholesky((A + A.transpose()) / 2), lambda X: np.linalg.cholesky(sym(X))),
+    "eigh": (A0, lambda A: linalg.eigh(A)[0], lambda X: np.linalg.eigh(sym(X))[0]),
+    "svd": (R0, lambda A: linalg.svd(A)[1], lambda X: np.linalg.svd(X)[1]),
+    "qr": (R0, lambda A: linalg.qr(A)[1].abs(), lambda X: np.abs(np.linalg.qr(X)[1])),
+    "lstsq": (R0, lambda A: linalg.lstsq(A, Tensor(np.ones((4, 2), "float32"))),
+              lambda X: np.linalg.lstsq(X, np.ones((4, 2)), rcond=None)[0]),
+    "solve_triangular": (A0, lambda A: linalg.solve_triangular(A, Tensor(b0), lower=True),
+                         lambda X: np.linalg.solve(np.tril(X), b64)),
+}
+results = {}
+for name, (X0, f, ref) in cases.items():
+    A = Tensor(X0); o = f(A)
+    (g,) = (o * Tensor(w(o).astype("float32"))).sum().gradient(A)
+    e = fd(lambda X: float((ref(X) * w(ref(X))).sum()), X0)
+    results[name] = bool(np.abs(e).max() > 1e-2 and np.allclose(g.numpy(), e, rtol=2e-2, atol=2e-3))
+# lu_factor has no one-line numpy reference: nonzero is the receipt.
+A = Tensor(A0); (g,) = linalg.lu_factor(A)[0].sum().gradient(A)
+results["lu_factor"] = bool(g.numpy().any())
+# Inside the trainer's tape: no host read at all (nothing is scheduled while
+# the ops build their graphs), and `eig`, whose symmetry gate needs one, is loud.
+with core.custom_gradient_tape():
+    k0 = GlobalCounters.kernel_count
+    linalg.cholesky(Tensor(A0)); linalg.eigh(Tensor(A0)); linalg.svd(Tensor(R0))
+    results["no_host_read_under_tape"] = GlobalCounters.kernel_count == k0
+    try:
+        linalg.eig(Tensor(A0)); results["eig_loud_under_tape"] = False
+    except NotImplementedError:
+        results["eig_loud_under_tape"] = True
+    # A Jacobi iteration too long to hold lazily (keras' own test_svd size:
+    # uncapped, that graph stalled an 8-core box) has no gradient: loud here,
+    # and refused BEFORE anything is built or scheduled.
+    k0 = GlobalCounters.kernel_count
+    try:
+        linalg.svd(Tensor(np.ones((4, 30, 20), "float32"))); results["big_svd_loud_under_tape"] = False
+    except NotImplementedError:
+        results["big_svd_loud_under_tape"] = GlobalCounters.kernel_count == k0
+# ... and the eager checks still fire.
+try:
+    linalg.cholesky(Tensor(-A0)); results["cholesky_still_raises"] = False
+except ValueError:
+    results["cholesky_still_raises"] = True
+print(json.dumps(results))
+""")
+    got = json.loads(out)
+    assert got and all(got.values()), got
+
+
+def test_elastic_transform_runs():
+    """The 2026-09-21 series dropped image.py's `draw_seed` import while
+    reordering the block: NameError on the first call, invisible to lint
+    (backend sources are excluded; `make lint-check` now runs F821 on them)
+    and to every other local test."""
+    out = _run("""
+import keras_tinygrad, keras
+import numpy as np
+y = keras.ops.image.elastic_transform(np.ones((1, 8, 8, 3), "float32"), seed=0)
+print(tuple(y.shape))
+""")
+    assert out == "(1, 8, 8, 3)", out

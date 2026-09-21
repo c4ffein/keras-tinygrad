@@ -1,8 +1,9 @@
 # Architecture — the tinygrad backend itself
 
 This file describes module boundaries, state ownership, and data-flow direction
-in the backend sources (`_backend/`, mirrored from the reference keras clone's
-`keras/src/backend/tinygrad/`). It stays at module altitude: no function
+in the backend sources (`src/keras_tinygrad/src/`, the pluggable-backend
+package shape: `ops/{core,image,linalg,math,nn,numpy}.py` + `random`, `rnn`,
+`trainer`, `layer`, `export`). It stays at module altitude: no function
 signatures, no line numbers, only contracts and invariants that survive
 refactors. The import-hook mechanism that grafts these modules onto stock
 Keras is covered by `docs/how-it-works.md`, not here.
@@ -24,7 +25,7 @@ flowchart TD
     E --> F{realize points}
     F --> G["Variable assign:<br/>detach().realize()"]
     F --> H["convert_to_numpy / .item():<br/>terminal reads, per predict batch"]
-    F --> I["linalg loop bodies:<br/>contiguous()/realize() to bound graphs"]
+    F --> I["linalg host checks (eager only):<br/>read a SIDE graph of the detached input"]
     T["trainer: forward under<br/>custom-gradient tape"] --> E
     E --> L["loss.gradient(*weights)<br/>(+ VJP composition around<br/>recorded custom blocks)"]
     L --> M["optimizer.apply → Variable assign"] --> G
@@ -56,7 +57,10 @@ numpy round-trips) and to make every exit from it explicit.
   float32 polynomial. numpy appears only for creation-time constant tables.
 - **linalg** — shape-stable classic algorithms (Householder QR, Gauss-Jordan
   inverse/solve with partial pivoting, cyclic Jacobi for eig/svd), computed
-  internally in float64 and cast back; `.item()` only on error/control paths.
+  internally in float64 and cast back. Nothing on the path to a returned
+  tensor is ever realized (invariant 12): loop bodies cut kernels with
+  `contiguous().contiguous_backward()`, and the `.item()` validity checks
+  read a side graph of the detached input, in eager use only.
 - **image** — gather-based sampling and weight-matrix matmuls so gradients
   flow w.r.t. the image; numpy only for static coordinate/weight tables;
   coordinate-side inputs get no gradients (numpy-reference behavior).
@@ -115,14 +119,19 @@ how-it-works.md for *how*):
    table).
 6. `keras.src.utils.backend_utils` — `DynamicBackend`'s per-backend branch.
 
-The six touchpoints have a second consumer besides the loader: the
-plugin-backends PoC (docs/upstream/keras-plugin-poc.md) formalizes them as
-an entry-point protocol (`keras.backends` group; standard names
-`trainer.Trainer` / `layer.Layer` / `export.ExportArchive` /
-`standardize_dtype_hook`, aliased in the backend sources). On a keras with
-native plugin support the packaged hook detects `backend/plugins.py` and
-stands down (`__init__.py`'s filesystem probe); on stock keras the entry
-point is inert and the hook patches as described below.
+The six touchpoints have a second consumer besides the loader: keras'
+`pluggable_backend` branch resolves the backend by NAME as
+`keras_tinygrad.src` and reads `trainer.Trainer` / `layer.BackendLayer` /
+`export.SavedModelExportArchive` (the last two optional; all aliased in
+the backend sources next to the `Tinygrad*` names), and the older
+plugin-backends PoC (docs/upstream/keras-plugin-poc.md) an entry-point
+protocol (`keras.backends` group, `layer.Layer` / `export.ExportArchive`
+/ `standardize_dtype_hook`). The loader's six patches import that same
+`keras_tinygrad.src` package, so stock keras and the branch share one
+backend with no alias. On a keras with native plugin support the packaged
+hook detects `backend/plugins.py` and stands down (`__init__.py`'s
+filesystem probe, or `KERAS_TINYGRAD_NO_HOOK=1` for the branch); on stock
+keras the entry point is inert and the hook patches as described below.
 
 **The rule:** these six ARE the contract between the backend and keras-core.
 Any change that adds a keras-core touchpoint must add the matching anchor to
@@ -147,8 +156,9 @@ through the hook itself, so a missing anchor fails there too.
   through `ml_dtypes` so callers see the same array dtype as other backends.
 - Variables **realize on assign** (detached concrete buffers), which bounds
   lazy-graph growth across training steps; the other deliberate realize
-  points are per-batch predict conversion and the `contiguous()/realize()`
-  calls inside linalg's iterative loops.
+  points are per-batch predict conversion and linalg's eager-only host
+  checks, which realize a side graph rebuilt from the detached input —
+  never a tensor the op returns (invariant 12).
 
 ### The gradient seam (core ⇄ trainer)
 
@@ -198,6 +208,19 @@ tape opener; symbolic build / predict / evaluate see passthrough behavior.
     is a forward passthrough by design.
 11. Every keras-core touchpoint has an anchor in the loader's patch table —
     added in the same change that creates the touchpoint.
+12. **A differentiable op never realizes anything on the path to what it
+    returns.** tinygrad 0.13 replaces a realized tensor's graph with its
+    buffer and `Tensor.gradient` then returns ZEROS upstream of it, without
+    an error; a host read (`.item()`, `convert_to_numpy`) does the same to
+    every `.contiguous()` node upstream of the value it reads. Loops bound
+    their kernels with `contiguous().contiguous_backward()`; a host-side
+    validity check reads a side graph rebuilt from the detached input and
+    is skipped under the trainer's tape (`core.in_custom_gradient_tape`).
+    Where a lazy graph is not affordable the op says so: a Jacobi
+    iteration past `linalg._JACOBI_LAZY_ROUNDS` realizes per round, carries
+    no gradient, and RAISES inside a train step.
+    Receipts: `tests/test_backend_regressions.py`
+    (`test_linalg_gradients_are_not_silently_zero`).
 
 ## Known leaks and quirks (accepted, not aspirational)
 
@@ -222,6 +245,35 @@ tape opener; symbolic build / predict / evaluate see passthrough behavior.
 - float8 interop is a recast dance: fp8 tensors are built as float32 buffers
   and cast on-device; `convert_to_numpy` re-quantizes through `ml_dtypes` to
   match other backends' array dtype.
+- **A host read in the middle of a forward pass zeroes gradients upstream
+  of it** (the mechanism of invariant 12), and the backend cannot prevent
+  that in code it does not own: a custom layer calling `.item()` /
+  `convert_to_numpy` on an intermediate, or an eager linalg host check
+  (cholesky's non-PD raise, `eig`'s symmetry gate, the Jacobi convergence
+  warning) whose INPUT comes out of a caller graph holding `.contiguous()`
+  nodes. Under the trainer's tape linalg does no host reads at all —
+  cholesky then yields NaN on a non-PD input like the jax backend under
+  tracing, the convergence warning is not evaluated, and `eig` raises (its
+  gate is what keeps a non-symmetric input from a silent wrong answer).
+  The price of the side graph: eager `cholesky` and SMALL eager
+  `eigh`/`svd` compute their iteration twice.
+- **Lazy graphs are not free, and Jacobi is where it shows.** Held as one
+  differentiable graph, eigh/svd cost superlinearly in rotation rounds
+  (svd of (4, n+4, n), CPU: n = 12 → 45 s / 0.8 GB; n = 20 — keras' own
+  `test_svd` — passed 6 GB and, uncapped, stalled an 8-core box on
+  2026-09-21). Hence `_JACOBI_LAZY_ROUNDS` (110): up to ~10 columns for
+  eigh, ~12 for svd, the iteration is lazy and differentiable; above, it
+  realizes per round like before — in eager use those results have ZERO
+  gradient for a raw-tinygrad caller (silently; nothing can be raised at
+  that point), inside a train step the op raises. The real fix is a
+  closed-form re-attachment (values from the realized iteration, gradient
+  from the eigh/svd perturbation formulas on a small lazy graph) — not
+  done. The elimination loops (inv/solve/det/lu/cholesky, n steps) are lazy
+  at every size; 32×32 measured fine, large n is unmeasured.
+- The test subprocesses and the referee run under resource caps
+  (`tests/_limits.py`; `REFEREE_MEM_MB` / `REFEREE_TEST_TIMEOUT` in
+  `scripts/referee.sh`) because of that incident: a runaway graph is a red
+  test, not a dead machine.
 - linalg computes internally in float64 regardless of input dtype; fine on
   CPU, a cost on accelerators.
 - `scatter_update` applies updates one masked `where` at a time to preserve
@@ -246,7 +298,8 @@ tape opener; symbolic build / predict / evaluate see passthrough behavior.
   uniform loud `NotImplementedError`; `SUPPORTS_COMPLEX_DTYPES` stays False.
   The tier boundary (interop vs arithmetic) and the rule for extending the
   wrapper's op set: `docs/complex-support.md`.
-- The backend sources live ONCE: `src/keras_tinygrad/_backend/`. (Until
-  2026-08-30 they were a snapshot of a sibling keras clone; that clone is
-  now a leftover and no tool reads it.) The referee clones the pinned
+- The backend sources live ONCE: `src/keras_tinygrad/src/` (since
+  2026-09-21 in the pluggable-backend package shape; until 2026-08-30 they
+  were a snapshot of a sibling keras clone; that clone is now a leftover
+  and no tool reads it.) The referee clones the pinned
   keras tag on its own into `.referee/`.

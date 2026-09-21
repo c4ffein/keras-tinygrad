@@ -1,42 +1,47 @@
-"""Protocol-layout shim: `keras_tinygrad.src` in the keras-mlx package shape.
+"""The tinygrad backend for Keras, in the pluggable-backend package shape.
 
-The pluggable-backend keras resolves out-of-tree backends as
-`keras_<name>.src` (star surface) with `trainer`/`layer`/`export`
-submodules. Our backend sources live in `_backend/` with in-tree-style
-internal imports (`keras.src.backend.tinygrad.*`); until the planned full
-restructure (see docs/upstream/keras-plugin-poc.md), this shim registers
-the `_backend` package under that in-tree alias BEFORE executing it —
-plugin-side, no keras patching — and re-exports the protocol surface.
+`keras_tinygrad.src` is what keras' pluggable_backend branch imports for
+`KERAS_BACKEND=tinygrad` (`keras_<name>.src`), and what the import hook's
+six patches import on stock keras 3.15.x. Same layout as keras' in-tree
+backends and keras-team/keras-openvino: `ops/` (core, image, linalg,
+math, nn, numpy), `random`, `rnn`, plus the optional `layer`, `trainer`,
+`export` modules.
+
+Keras >= 3.16 reads `backend.ops.numpy.x`; keras 3.15.x reads
+`backend.numpy.x`. Both spellings are exported here, so one package
+serves both.
 """
 
-import importlib.util
-import sys
-
-_ALIAS = "keras.src.backend.tinygrad"
-
-if _ALIAS not in sys.modules:
-    _spec = importlib.util.find_spec("keras_tinygrad._backend")
-    _module = importlib.util.module_from_spec(_spec)
-    # Both names registered before exec: the sources import themselves
-    # through the in-tree alias path.
-    sys.modules["keras_tinygrad._backend"] = _module
-    sys.modules[_ALIAS] = _module
-    try:
-        _spec.loader.exec_module(_module)
-    except BaseException:
-        sys.modules.pop("keras_tinygrad._backend", None)
-        sys.modules.pop(_ALIAS, None)
-        raise
-
-from keras_tinygrad.src import ops  # noqa: F401, E402
-
-from keras.src.backend.common.name_scope import (  # noqa: E402
-    name_scope,  # noqa: F401
-)
-from keras.src.backend.tinygrad import *  # noqa: F401, F403, E402
-from keras.src.backend.tinygrad.core import (  # noqa: F401, E402
-    Variable,  # noqa: F401, E402
-    standardize_dtype_hook,
-)
+from keras.src.backend.common.name_scope import name_scope
+from keras_tinygrad.src import ops
+from keras_tinygrad.src import random
+from keras_tinygrad.src.ops import core
+from keras_tinygrad.src.ops import image
+from keras_tinygrad.src.ops import linalg
+from keras_tinygrad.src.ops import math
+from keras_tinygrad.src.ops import nn
+from keras_tinygrad.src.ops import numpy
+from keras_tinygrad.src.ops.core import IS_THREAD_SAFE
+from keras_tinygrad.src.ops.core import SUPPORTS_COMPLEX_DTYPES
+from keras_tinygrad.src.ops.core import SUPPORTS_RAGGED_TENSORS
+from keras_tinygrad.src.ops.core import SUPPORTS_SPARSE_TENSORS
+from keras_tinygrad.src.ops.core import Variable
+from keras_tinygrad.src.ops.core import cast
+from keras_tinygrad.src.ops.core import compute_output_spec
+from keras_tinygrad.src.ops.core import cond
+from keras_tinygrad.src.ops.core import convert_to_numpy
+from keras_tinygrad.src.ops.core import convert_to_tensor
+from keras_tinygrad.src.ops.core import device_scope
+from keras_tinygrad.src.ops.core import is_tensor
+from keras_tinygrad.src.ops.core import random_seed_dtype
+from keras_tinygrad.src.ops.core import shape
+from keras_tinygrad.src.ops.core import standardize_dtype_hook
+from keras_tinygrad.src.ops.core import vectorized_map
+from keras_tinygrad.src.rnn import bidirectional_gru
+from keras_tinygrad.src.rnn import bidirectional_lstm
+from keras_tinygrad.src.rnn import cudnn_ok
+from keras_tinygrad.src.rnn import gru
+from keras_tinygrad.src.rnn import lstm
+from keras_tinygrad.src.rnn import rnn
 
 distribution_lib = None

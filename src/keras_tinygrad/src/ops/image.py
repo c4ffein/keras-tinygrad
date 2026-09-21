@@ -23,11 +23,12 @@ from tinygrad import Tensor
 from tinygrad import dtypes as tg_dtypes
 
 from keras.src import backend
-from keras.src.backend.tinygrad.core import convert_to_numpy
 from keras.src.random.seed_generator import draw_seed
-from keras.src.backend.tinygrad.core import convert_to_tensor
-from keras.src.backend.tinygrad.core import to_keras_dtype
-from keras.src.backend.tinygrad.core import to_tinygrad_dtype
+from keras_tinygrad.src.ops.core import MissingOpError
+from keras_tinygrad.src.ops.core import convert_to_numpy
+from keras_tinygrad.src.ops.core import convert_to_tensor
+from keras_tinygrad.src.ops.core import to_keras_dtype
+from keras_tinygrad.src.ops.core import to_tinygrad_dtype
 
 RESIZE_INTERPOLATIONS = (
     "bilinear",
@@ -1236,6 +1237,8 @@ def sobel_edges(images, data_format=None):
 def __getattr__(name):
     if name.startswith("__") and name.endswith("__"):
         raise AttributeError(name)
-    raise NotImplementedError(
+    # NotImplementedError AND AttributeError: loud when called, absent when
+    # probed with hasattr (see core.MissingOpError).
+    raise MissingOpError(
         f"tinygrad backend: `keras.ops.image.{name}` is not implemented yet"
     )

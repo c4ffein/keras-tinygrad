@@ -104,7 +104,7 @@ into the keras source tree.
 ## keras-tinygrad side changes
 
 - `pyproject.toml`: `[project.entry-points."keras.backends"]
-  tinygrad = "keras_tinygrad._backend"` — inert on stock keras.
+  tinygrad = "keras_tinygrad.src"` — inert on stock keras.
 - `__init__.py`: filesystem-only probe (`find_spec("keras")` +
   `.../src/backend/plugins.py` existence — no keras import, which would
   defeat the hook's install-before-keras requirement); hook installs only

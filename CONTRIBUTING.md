@@ -55,7 +55,8 @@ under `keras/src/layers/`.
 Implementing an op:
 
 1. Find its numpy-backend implementation and its Keras test(s).
-2. Write the tinygrad version in the matching `_backend/` module. Stay on
+2. Write the tinygrad version in the matching `keras_tinygrad/src/` module
+   (`ops/numpy.py`, `ops/nn.py`, ...). Stay on
    `Tensor` the whole way — `Tensor.__array__` exists for the test harness
    and tuple-returning ops, not for op internals.
 3. Run the op's Keras tests. Fix until green. If a test documents a
@@ -81,7 +82,7 @@ Implementing an op:
 ## Where things live
 
 - `src/keras_tinygrad/_loader.py` — meta-path finder + patch table.
-- `src/keras_tinygrad/_backend/` — the backend, one module per Keras
+- `src/keras_tinygrad/src/` — the backend, one module per Keras
   backend surface (`core`, `numpy`, `nn`, `math`, `rnn`, `random`,
   `image`, `linalg`, `layer`, `trainer`, `export`).
 - `examples/` — runnable smoke and demo scripts.

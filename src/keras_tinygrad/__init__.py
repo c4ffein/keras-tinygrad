@@ -21,7 +21,7 @@ import os
 
 from keras_tinygrad._loader import install
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 
 
 def reset_device_rng():
@@ -33,7 +33,7 @@ def reset_device_rng():
     (e.g. a `train_on_batch` loop on an already-compiled model). Details:
     docs/device-rng.md.
     """
-    from keras.src.backend.tinygrad import random as backend_random
+    from keras_tinygrad.src import random as backend_random
 
     backend_random.reset_device_stream()
 
@@ -49,9 +49,9 @@ def _keras_supports_backend_plugins():
 
 os.environ.setdefault("KERAS_BACKEND", "tinygrad")
 # KERAS_TINYGRAD_NO_HOOK=1: skip the import hook entirely. Needed when a
-# pluggable-backend keras imports this package ITSELF (as `keras_
-# tinygrad.src`, mid-keras-import — the hook's keras-first guard would
-# fire); the filesystem probe below only detects OUR fork's marker, not
+# pluggable-backend keras imports this package ITSELF (as
+# `keras_tinygrad.src`, mid-keras-import — the hook's keras-first guard
+# would fire); the filesystem probe below only detects OUR fork's marker, not
 # the keras team's mechanism (their branch has no plugins.py). A proper
 # marker/version probe replaces this when their design ships.
 if os.environ.get("KERAS_TINYGRAD_NO_HOOK") != "1":

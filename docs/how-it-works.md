@@ -9,13 +9,9 @@ surface. Neither touches your Keras install on disk.
 Keras 3 selects its backend with hardcoded `elif` chains that `raise` at
 import time for unknown names. There is no plugin API. So `import
 keras_tinygrad` inserts a `MetaPathFinder` at the front of `sys.meta_path`
-— before Keras is imported — that does exactly two things:
+— before Keras is imported — that does exactly one thing:
 
-1. **Serves** `keras.src.backend.tinygrad` from this package's `_backend/`
-   directory. Only the package name itself is intercepted; once its
-   `__path__` points at `_backend/`, the stock `PathFinder` resolves every
-   submodule normally.
-2. **Patches** six stock Keras modules by exec'ing a copy of their source
+**Patches** six stock Keras modules by exec'ing a copy of their source
    with exact-string replacements: the backend loader's `elif` chain, the
    `standardize_dtype` shim (tinygrad `DType.name` spellings differ from
    Keras'), the per-backend `Layer` mixin, the per-backend `Trainer`,
@@ -24,13 +20,20 @@ keras_tinygrad` inserts a `MetaPathFinder` at the front of `sys.meta_path`
    layers downstream), and `ExportArchive` (imported unconditionally, so
    its `raise` must be patched too).
 
+The patched branches import the backend as the plain package
+`keras_tinygrad.src` — the module Keras' `pluggable_backend` branch itself
+resolves for `KERAS_BACKEND=tinygrad` (`keras_<name>.src`), so the same
+package serves both without an alias. Nothing is served under a
+`keras.src.backend.tinygrad` name: stock Keras never builds a backend
+module name dynamically, so the six patched import sites are the only
+places the backend is named.
+
 ```mermaid
 flowchart TD
     A["import keras_tinygrad"] --> B["install(): finder inserted at<br/>front of sys.meta_path"]
     B --> C["import keras"]
     C --> D{module name?}
-    D -- "keras.src.backend.tinygrad" --> E["spec served from<br/>keras_tinygrad/_backend/"]
-    D -- "one of the 6 patch targets" --> F["_PatchedLoader:<br/>real source + exact-string patches"]
+    D -- "one of the 6 patch targets" --> F["_PatchedLoader:<br/>real source + exact-string patches<br/>(import keras_tinygrad.src)"]
     F --> G{each anchor<br/>matches exactly once?}
     G -- yes --> H["exec patched source"]
     G -- no --> I["ImportError:<br/>keras version not supported"]
@@ -51,10 +54,14 @@ the stock install.
 
 ## The backend
 
-`_backend/` mirrors the layout of Keras' in-tree backends: `core.py`
-(tensors, variables, dtypes), `numpy.py` (the `keras.ops.numpy` surface),
-`nn.py`, `math.py`, `rnn.py`, `random.py`, `image.py`, `linalg.py`,
-`layer.py`, `trainer.py`, `export.py`.
+`keras_tinygrad/src/` has the layout of Keras' in-tree backends (and of
+`keras-team/keras-openvino` / `keras-mlx`, the split-out reference
+backends): `ops/core.py` (tensors, variables, dtypes), `ops/numpy.py` (the
+`keras.ops.numpy` surface), `ops/nn.py`, `ops/math.py`, `ops/image.py`,
+`ops/linalg.py`, then `rnn.py`, `random.py`, `layer.py`, `trainer.py`,
+`export.py`. The package `__init__` exports the `ops` subpackage (what
+Keras ≥ 3.16 reads: `backend.ops.numpy.x`) AND the flat module names
+(what 3.15.x reads: `backend.numpy.x`).
 
 **Semantic reference: the numpy backend.** Where Keras' numpy backend
 defines the expected behavior, ours ports it to tinygrad tensors

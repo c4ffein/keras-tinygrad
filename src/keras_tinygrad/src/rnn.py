@@ -11,7 +11,7 @@ from tinygrad import Tensor
 from tinygrad import dtypes as tg_dtypes
 
 from keras.src import tree
-from keras.src.backend.tinygrad.core import convert_to_tensor
+from keras_tinygrad.src.ops.core import convert_to_tensor
 
 
 def rnn(

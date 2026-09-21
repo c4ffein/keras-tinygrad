@@ -18,11 +18,12 @@ from keras.src import tree
 from keras.src.backend.common import standardize_dtype
 from keras.src.backend.common.dtypes import result_type
 from keras.src.backend.config import floatx
-from keras.src.backend.tinygrad.core import _COMPLEX_INTEROP_MSG
-from keras.src.backend.tinygrad.core import ComplexTensor
-from keras.src.backend.tinygrad.core import convert_to_tensor
-from keras.src.backend.tinygrad.core import to_keras_dtype
-from keras.src.backend.tinygrad.core import to_tinygrad_dtype
+from keras_tinygrad.src.ops.core import ComplexTensor
+from keras_tinygrad.src.ops.core import MissingOpError
+from keras_tinygrad.src.ops.core import _COMPLEX_INTEROP_MSG
+from keras_tinygrad.src.ops.core import convert_to_tensor
+from keras_tinygrad.src.ops.core import to_keras_dtype
+from keras_tinygrad.src.ops.core import to_tinygrad_dtype
 
 
 # tinygrad's `Tensor.__bool__` raises unconditionally, but Keras — and its
@@ -2911,7 +2912,7 @@ def argpartition(x, kth, axis=-1):
 
 
 def slogdet(x):
-    from keras.src.backend.tinygrad.linalg import det
+    from keras_tinygrad.src.ops.linalg import det
 
     d = det(convert_to_tensor(x))
     return (d.sign(), _float(d).abs().log())
@@ -3096,9 +3097,77 @@ def isreal(x):
     return Tensor.ones(*x.shape, dtype=to_tinygrad_dtype("bool"))
 
 
+# ---------------------------------------------------------------------------
+# Ops that exist on keras master (3.16-dev) but not in the 3.15.x pin:
+# same numpy-reference semantics as keras' numpy backend. Keras 3.15's own
+# suite cannot referee them, so tests/test_ops_beyond_pin.py carries the
+# master test cases until the pin moves.
+# ---------------------------------------------------------------------------
+
+
+def copysign(x1, x2):
+    # numpy reference: result_type(x1, x2, float). Signs are sign BITS on
+    # both sides: x2 = -0.0 gives a negative result, and the magnitude of
+    # x1 = -0.0 is +0.0 — `abs` cannot provide that (tinygrad's abs keeps
+    # -0.0), so the sign bit is cleared / read with bitcasts.
+    dtype = result_type(_dtype_of(x1), _dtype_of(x2), float)
+    a = convert_to_tensor(x1, dtype)
+    b = convert_to_tensor(x2, dtype)
+    int_dtype = to_tinygrad_dtype(_FLOAT_BITS_INT[dtype])
+    mask = (1 << (int_dtype.itemsize * 8 - 1)) - 1
+    mag = (a.bitcast(int_dtype) & mask).bitcast(a.dtype)
+    negative = b.bitcast(int_dtype) < 0
+    return negative.where(-mag, mag)
+
+
+def float_power(x1, x2):
+    # numpy reference: `power` on operands promoted to a float dtype first,
+    # so a negative integer exponent has a defined (fractional) result.
+    dtype = result_type(_dtype_of(x1), _dtype_of(x2), float)
+    a = convert_to_tensor(x1, dtype)
+    b = convert_to_tensor(x2, dtype)
+    out = a**b
+    tg_dtype = to_tinygrad_dtype(dtype)
+    return out.cast(tg_dtype) if out.dtype != tg_dtype else out
+
+
+def cov(x):
+    x = convert_to_tensor(x)
+    if x.ndim > 2:
+        raise ValueError(
+            "Input tensor must have at most 2 dimensions. "
+            f"Received: x.shape={x.shape}"
+        )
+    in_dtype = to_keras_dtype(x.dtype)
+    # The Cov op's output-spec rule: int64 -> float64, everything else
+    # result_type(dtype, float) (int32 -> floatx, float16 stays float16).
+    if in_dtype == "int64":
+        dtype = "float64"
+    else:
+        dtype = result_type(in_dtype, float)
+    compute = "float64" if dtype == "float64" else "float32"
+    xt = x.cast(to_tinygrad_dtype(compute))
+    # np.cov's default layout: rows are variables, columns observations.
+    if xt.ndim == 0:
+        xt = xt.reshape(1, 1)
+    elif xt.ndim == 1:
+        xt = xt.reshape(1, -1)
+    n_obs = builtins.int(xt.shape[1])
+    m = xt - xt.mean(axis=1, keepdim=True)
+    # ddof=1: a single observation divides by zero -> nan, like np.cov.
+    c = m.matmul(m.permute(1, 0)) / builtins.float(n_obs - 1)
+    # (N, N) for a 2-D input of N > 1 variables; a scalar otherwise.
+    if not (x.ndim == 2 and x.shape[0] != 1):
+        c = c.reshape(())
+    tg_dtype = to_tinygrad_dtype(dtype)
+    return c.cast(tg_dtype) if c.dtype != tg_dtype else c
+
+
 def __getattr__(name):
     if name.startswith("__") and name.endswith("__"):
         raise AttributeError(name)
-    raise NotImplementedError(
+    # NotImplementedError AND AttributeError: loud when called, absent when
+    # probed with hasattr (see core.MissingOpError).
+    raise MissingOpError(
         f"tinygrad backend: `keras.ops.{name}` is not implemented yet"
     )

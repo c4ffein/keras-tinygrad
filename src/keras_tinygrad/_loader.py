@@ -5,18 +5,18 @@ Stock Keras 3 hardcodes its backend dispatch as ``elif`` chains that
 behavioral special-cases: ``standardize_dtype`` and ``DynamicBackend``'s
 per-backend branch.  There is no plugin hook, so we install a
 :class:`importlib.abc.MetaPathFinder` at the front of ``sys.meta_path``
-(before Keras is imported) that does two things:
+(before Keras is imported) that intercepts exactly six Keras modules and
+execs a patched copy of their source, produced by exact-string replacement
+(see ``_PATCHES``).  Every anchor must match exactly once or the import
+fails loudly with a version-mismatch error -- we never guess and never let
+Keras fall through to its own "Unable to import backend" error.
 
-1. Serves ``keras.src.backend.tinygrad`` from this package's ``_backend/``
-   directory (verbatim backend sources).  Only the package name itself is
-   intercepted; once its ``__path__`` points at ``_backend/``, the stock
-   ``PathFinder`` resolves every submodule import normally.
-
-2. Intercepts exactly six Keras modules and execs a patched copy of their
-   source, produced by exact-string replacement (see ``_PATCHES``).  Every
-   anchor must match exactly once or the import fails loudly with a
-   version-mismatch error -- we never guess and never let Keras fall
-   through to its own "Unable to import backend" error.
+The patches import the backend as the plain package ``keras_tinygrad.src``
+-- the same module keras' pluggable_backend branch resolves for
+``KERAS_BACKEND=tinygrad`` (``keras_<name>.src``).  Nothing is served under
+a ``keras.src.backend.tinygrad`` alias: stock keras never builds a backend
+module name dynamically, so the six patched import sites are the only
+places the backend is named.
 
 Everything else imports untouched.
 """
@@ -27,9 +27,6 @@ import importlib.util
 import os
 import sys
 
-_BACKEND_PKG = "keras.src.backend.tinygrad"
-_BACKEND_DIR = os.path.join(os.path.dirname(__file__), "_backend")
-
 # ---------------------------------------------------------------------------
 # The patch table: module name -> list of (anchor, replacement).
 # Anchors are exact source strings from stock keras (verified against the
@@ -37,8 +34,8 @@ _BACKEND_DIR = os.path.join(os.path.dirname(__file__), "_backend")
 # ---------------------------------------------------------------------------
 
 _TINYGRAD_BACKEND_BRANCH = """elif backend() == "tinygrad":
-    from keras.src.backend.tinygrad import *  # noqa: F403
-    from keras.src.backend.tinygrad.core import Variable as BackendVariable
+    from keras_tinygrad.src import *  # noqa: F403
+    from keras_tinygrad.src.ops.core import Variable as BackendVariable
 
     distribution_lib = None
 else:
@@ -48,7 +45,7 @@ _TINYGRAD_DTYPE_SHIM = """    dtype = dtypes.PYTHON_DTYPES_MAP.get(dtype, dtype)
     if type(dtype).__module__.split(".")[0] == "tinygrad":
         # tinygrad DType.name spellings ("float", "half", ...) don't match
         # the Keras names; map through the backend's table.
-        from keras.src.backend.tinygrad.core import to_keras_dtype
+        from keras_tinygrad.src.ops.core import to_keras_dtype
 
         dtype = to_keras_dtype(dtype)
     if hasattr(dtype, "name"):"""
@@ -78,8 +75,7 @@ _PATCHES = {
             'else:\n    raise RuntimeError(\n        f"Backend'
             " '{backend.backend()}' must implement a layer mixin class.\"",
             'elif backend.backend() == "tinygrad":\n'
-            "    from keras.src.backend.tinygrad.layer import"
-            " TinygradLayer as BackendLayer\n"
+            "    from keras_tinygrad.src.layer import BackendLayer\n"
             'else:\n    raise RuntimeError(\n        f"Backend'
             " '{backend.backend()}' must implement a layer mixin class.\"",
         ),
@@ -90,8 +86,7 @@ _PATCHES = {
             'else:\n    raise RuntimeError(\n        f"Backend'
             " '{backend.backend()}' must implement the Trainer class.\"",
             'elif backend.backend() == "tinygrad":\n'
-            "    from keras.src.backend.tinygrad.trainer import"
-            " TinygradTrainer as Trainer\n"
+            "    from keras_tinygrad.src.trainer import Trainer\n"
             'else:\n    raise RuntimeError(\n        f"Backend'
             " '{backend.backend()}' must implement the Trainer class.\"",
         ),
@@ -113,7 +108,7 @@ _PATCHES = {
             "            return getattr(module, name)\n"
             '        if self._backend == "tinygrad":\n'
             "            module = importlib.import_module("
-            '"keras.src.backend.tinygrad")\n'
+            '"keras_tinygrad.src")\n'
             "            return getattr(module, name)",
         ),
     ],
@@ -124,7 +119,7 @@ _PATCHES = {
         (
             "else:\n    raise RuntimeError(\n        f\"Backend '{backend.backend()}' must implement ExportArchive.\"",
             'elif backend.backend() == "tinygrad":\n'
-            "    from keras.src.backend.tinygrad.export import (\n"
+            "    from keras_tinygrad.src.export import (\n"
             "        TinygradExportArchive as BackendSavedModelExportArchive,\n"
             "    )\n"
             'else:\n    raise RuntimeError(\n        f"Backend'
@@ -172,12 +167,6 @@ def _apply_patches(fullname, source):
 
 class TinygradBackendFinder(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname == _BACKEND_PKG:
-            return importlib.util.spec_from_file_location(
-                fullname,
-                os.path.join(_BACKEND_DIR, "__init__.py"),
-                submodule_search_locations=[_BACKEND_DIR],
-            )
         if fullname not in _PATCHES:
             return None
         # Locate the real module without re-entering sys.meta_path.
@@ -238,7 +227,7 @@ def install():
     global _FINDER
     if _FINDER is not None:
         return
-    already = [name for name in list(_PATCHES) + [_BACKEND_PKG] if name in sys.modules]
+    already = [name for name in _PATCHES if name in sys.modules]
     if already:
         raise RuntimeError(
             f"keras_tinygrad must be imported BEFORE keras: these keras modules are already loaded unpatched: {already}"

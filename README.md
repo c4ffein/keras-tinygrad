@@ -64,9 +64,10 @@ install.
 ## How it can be a backend without a fork
 
 Keras 3 has no backend plugin hook. This package installs a
-`sys.meta_path` finder that serves `keras.src.backend.tinygrad` from its own
-sources and surgically patches the six Keras modules that hardcode backend
-dispatch. Each patch is an exact-string anchor that must match **exactly
+`sys.meta_path` finder that surgically patches the six Keras modules that
+hardcode backend dispatch, pointing them at the plain `keras_tinygrad.src`
+package — the same module Keras' pluggable-backend branch resolves for
+`KERAS_BACKEND=tinygrad`, in the same layout as `keras-openvino` / `keras-mlx`. Each patch is an exact-string anchor that must match **exactly
 once** — on an unsupported Keras version the import fails loudly with a
 version-mismatch error instead of guessing. Details in
 [docs/how-it-works.md](https://github.com/c4ffein/keras-tinygrad/blob/main/docs/how-it-works.md).

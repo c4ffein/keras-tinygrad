@@ -1,6 +1,8 @@
-import keras_tinygrad.src  # noqa: F401 -- registers the backend alias
+class TinygradLayer:
+    pass
 
-from keras.src.backend.tinygrad.layer import (
-    Layer,  # noqa: F401
-    TinygradLayer,  # noqa: F401
-)
+
+# `BackendLayer`: what keras' pluggable_backend branch reads from
+# `keras_<name>.src.layer`. `Layer`: the older plugin-PoC name.
+BackendLayer = TinygradLayer
+Layer = TinygradLayer

@@ -69,7 +69,7 @@ class KerasTrainStep:
         return out
 
     def __call__(self, x, y):
-        from keras.src.backend.tinygrad.core import (
+        from keras_tinygrad.src.ops.core import (
             compute_gradients,
             custom_gradient_tape,
             device_rng_scope,
@@ -236,7 +236,7 @@ def export_train_step(
     assert "NULL" in Device.DEFAULT, (
         f"export requires DEV=NULL:WGSL before importing tinygrad (device is {Device.DEFAULT})"
     )
-    from keras.src.backend.tinygrad.core import device_rng_enabled
+    from keras_tinygrad.src.ops.core import device_rng_enabled
 
     if getattr(loss_fn, "reduction", None) not in (None, "none"):
         # Keras' default "sum_over_batch_size" divides by
@@ -264,7 +264,7 @@ def export_train_step(
         # first draw would replace the very buffers saved in `state` — the
         # captured kernels then read fresh, never-written buffers
         # (validate_runner_js catches it as an empty-buffer read).
-        from keras.src.backend.tinygrad import random as _backend_random
+        from keras_tinygrad.src import random as _backend_random
 
         generators = [
             gen for layer in model._flatten_layers() for gen in (getattr(layer, "_seed_generators", None) or [])

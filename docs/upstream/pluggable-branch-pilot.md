@@ -14,6 +14,15 @@ upstream by #23507 with the same fix shape — our local branch fix and
 Items 2–5 (dtype hook, protocol docs, test assumptions, DynamicBackend)
 remain open upstream and current.
 
+**2026-09-21 static check against branch head `60be5d35`** (no
+re-run): the protocol moved on — plugins resolve from a hard-coded
+`_PLUGGABLE_BACKENDS` frozenset (`tinygrad` not in it), the shim's
+`layer` / `export` attribute names are now `BackendLayer` /
+`SavedModelExportArchive` (both optional modules), OpenVINO lives in
+`keras-team/keras-openvino`. The "thin protocol shim" below is gone: the
+backend sources now ARE `keras_tinygrad.src` in the reference layout.
+Details and what was fixed: `keras-master-and-branch-status-2026-09-21.md`.
+
 ## Result
 
 With ~80 generic lines added to the branch's six dispatch `else:` tails

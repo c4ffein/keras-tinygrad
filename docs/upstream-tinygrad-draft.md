@@ -161,8 +161,8 @@ bug fixes, HANDOFF item 5):
   `tuple(newshape)` with the comment naming argfix's exact-class check;
 - `keras/src/backend/tinygrad/numpy.py:1117-1125` — `broadcast_to`, same.
 
-(Vendored mirror: `src/keras_tinygrad/_backend/numpy.py`, byte-identical
-— the sources under `src/keras_tinygrad/_backend/` are the source of truth.)
+(The sources under `src/keras_tinygrad/src/` — `ops/numpy.py` — are the
+source of truth.)
 
 **Cost:** a per-call-site vigilance tax — every current and future
 backend op that forwards a caller-provided shape into tinygrad must

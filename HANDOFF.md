@@ -1,4 +1,4 @@
-# HANDOFF — state of the keras-tinygrad bridge (2026-09-01)
+# HANDOFF — state of the keras-tinygrad bridge (2026-09-21)
 
 Written by the session that built all of this in one day, for whoever picks it
 up next (human or agent). Everything below was true at write time; verify with
@@ -15,7 +15,7 @@ The first Keras 3 backend for tinygrad. Two forms:
 2. **Packaged** (the only form): this repo — pip package running the
    backend against STOCK pypi keras via a meta-path import hook (6
    match-exactly-once source patches; see `docs/how-it-works.md`). The
-   backend sources under `src/keras_tinygrad/_backend/` ARE the source of
+   backend sources under `src/keras_tinygrad/src/` ARE the source of
    truth. The referee (`make referee` → `scripts/referee.sh`) clones the
    pinned keras tag into `.referee/` and runs Keras' own tests from inside
    that tree with the hook active — no hand-edited checkout anywhere.
@@ -126,6 +126,109 @@ through the script's own check: "OK — failed set == baseline (5 known)".
   state, what is missing is a real-GPU run), `run-bench.sh` tf.min.js
   source (was an nnvp path).
 
+## 2026-09-21 — cloud patch series reviewed + integrated, linalg gradients fixed
+
+All uncommitted in the working tree (the owner commits). Source: the
+5-patch series `c4ffein-work/playground`, branch
+`claude/keras-tinygrad-openvino-check-ay9203`,
+`patches/c4ffein__keras-tinygrad/2026-09-21-keras-master-branch-compat/`
+(its REPORT.md is the why; remainder 9 below is the summary). Applied whole,
+then reviewed locally. What the review changed:
+
+- **`elastic_transform` was broken by the series**: patch 1 dropped
+  `image.py`'s `draw_seed` import while reordering the block → NameError on
+  first call. Invisible to `make verify` (backend sources are excluded from
+  ruff, no local test called the op). Restored; `make lint-check` now also
+  runs `ruff --isolated --select F821` over `src/keras_tinygrad/src`
+  (undefined names only — formatting still never touches those files);
+  receipt `test_elastic_transform_runs`.
+- **`gammainc` gradients were NaN at the domain edges** (x = 0, x = inf),
+  and through a broadcast `a` the NaN reached every element: the edges were
+  patched in with `where` AFTER the expansions had seen them, and the
+  broadcast was `a + x * 0.0` (inf * 0). Now: static-shape `expand`, edge
+  elements run the expansions on an interior point (gradient exactly 0
+  there), and `gammainc(0, 0)` is nan like scipy. Receipt:
+  `gammainc_grad_edges_finite` in `tests/test_ops_beyond_pin.py`.
+- Small: `MissingOpError` moved above the `SUPPORTS_*` flags it had split;
+  a dead `rnn` module import in `src/__init__.py`; NOTICE's path.
+- **Pre-existing, found through the series' REPORT aside — linalg gradients
+  were silently ZERO** for inv / det / solve / lu_factor / cholesky / eigh /
+  svd / lstsq / pinv (qr, norm, solve_triangular were fine). Mechanism, with
+  minimal repros in linalg's module docstring: tinygrad 0.13 swaps a
+  realized tensor's graph for its buffer and `Tensor.gradient` returns zeros
+  upstream, no error; `.item()` does the same to every `.contiguous()` node
+  upstream of what it reads. The loops called `.realize()` per step and the
+  validity checks read the returned factors. Fix = architecture invariant
+  12 (new): `_cut` (`contiguous().contiguous_backward()`) in the loops, host
+  checks on a side graph of the detached input, none under the trainer's
+  tape (`core.in_custom_gradient_tape`; `eig` raises there). The ops
+  now match finite differences of the numpy reference
+  (`test_linalg_gradients_are_not_silently_zero`).
+- **The first version of that fix stalled the box** (load average 174, the
+  owner killed the process from the host): fully lazy Jacobi is superlinear
+  in rotation rounds and keras' `test_svd` (4, 30, 20) is 190 of them. Now
+  `linalg._JACOBI_LAZY_ROUNDS = 110`: below, lazy + differentiable; above,
+  realize per round as before (no gradient; RAISES inside a train step).
+  Measurements and the not-done real fix (closed-form gradient
+  re-attachment): architecture.md "known leaks". Lesson kept in code, at
+  the owner's suggestion: every test subprocess runs under
+  `tests/_limits.py` (4 GB address space, 1800 CPU-s, nice; receipts in
+  `tests/test_limits.py`), and `scripts/referee.sh` caps its run
+  (`REFEREE_MEM_MB`=8192, per-test `REFEREE_TEST_TIMEOUT`=900 via
+  pytest-timeout, nice). Re-run of the stalling test under a 6 GB cap
+  before the fix: MemoryError in 75 s, load 2. `make referee` now calls
+  `bash scripts/referee.sh` (the file is mode 644 in git).
+- NOT fixed, same mechanism, needs an audit: every other mid-forward host
+  read — `core.cond` / `while_loop` predicates (`.numpy().item()`), the
+  index/argument reads in `ops/numpy.py` (13 `.item()` sites). They only
+  bite when the value read sits downstream of a `.contiguous()` node that
+  is also upstream of the loss (nn.py has 3 such nodes, numpy.py 2, core
+  5), and the jitted train step already refuses host reads loudly — the
+  exposure is the EAGER fallback path. `make fuzz-grad` could not have
+  caught the linalg zeros: `tools/parity_fuzz.py` has no linalg case at all.
+- **Version 0.2.0** (pyproject, `__version__`, uv.lock — owner's call,
+  2026-09-21): `keras.src.backend.tinygrad`, importable on the PyPI
+  0.1.0 / 0.1.1 wheels, no longer exists; the backend is
+  `keras_tinygrad.src`. Not tagged, not published.
+- **The referee had been running on the wrong tinygrad**: referee.sh took
+  the first `"tinygrad…"` string in pyproject — the KEYWORD — as the pin,
+  so `.referee/venv-*` got the latest release (0.14.0 since 2026-08-30;
+  the 2026-09-01 tally of record was taken on it). On 0.14 the ops/numpy
+  suite has 49 extra failures (`Cannot map tinygrad dtype dtypes.weakint /
+  weakfloat to Keras` — python-scalar dtypes, a real item for the day the
+  pin moves) plus a zig cc compile error in test_power. Fixed: the grep
+  wants a version operator, an existing venv is re-pinned on every run,
+  and the preflight prints the tinygrad version.
+- Owner call left open: whether the gammainc gradient receipt (~1 min of
+  first-use compile) belongs in `make verify`.
+
+Receipts (2026-09-21, final working tree, this box with `CC=zigcc`; every
+referee number below is on the PINNED tinygrad 0.13.0 — runs earlier the
+same day were on the accidental 0.14.0 and are void):
+
+- `make verify`: ruff + the F821 pass over the backend sources + format
+  clean, **53 passed** (2:41). `make smoke`, `make tutorial`,
+  `make vendor-check`, `make readme-check`: green.
+- `bash scripts/referee.sh keras/src/ops/numpy_test.py`: **3 failed /
+  5,444 passed / 708 skipped** — the three known (unique, vectorize,
+  test_cross). The script prints them as NEW because
+  `scripts/referee-baseline.txt` only covers the layers tree.
+- `… keras/src/ops/{linalg,math,image}_test.py`: **695 passed / 17
+  skipped**, the same tally as the unmodified `cf75be8` tree (that
+  comparison run was on 0.14.0); includes the `test_svd` that stalled the
+  box.
+- Known wart, also on the unmodified tree: a process that imported
+  tensorflow (ops/image_test, the preprocessing tree) aborts AT EXIT with
+  tinygrad 0.13 — `free(): invalid pointer`, exit 134, after pytest's
+  complete summary. referee.sh tolerates exactly that shape with a loud
+  WARNING (any abort without a final summary is still a crash) and sets
+  `ulimit -c 0` (each abort left a ~1 GB core file in `.referee/`).
+- Layers tree, the tally of record (`bash scripts/referee.sh`, 0:25:36):
+  **5 failed / 1,988 passed / 215 skipped / 1 xpassed** — "OK — failed
+  set == baseline (5 known)", identical to the 2026-09-01 tally (which was
+  taken on tinygrad 0.14.0; this one is the first on the pinned 0.13.0).
+  The exit-time abort above fired after the summary, as expected.
+
 ## How to run anything
 
 ```sh
@@ -137,7 +240,7 @@ make referee-quick
 # any keras path, e.g. the ops suites:
 scripts/referee.sh keras/src/ops/numpy_test.py
 # dev loop (uv-based; .venv resolves keras 3.15.1):
-make verify     # ruff lint + format + loader tests + backend regression receipts (~45 s)
+make verify     # ruff lint + format + loader tests + backend regression receipts (~3 min since 2026-09-21)
 make smoke tutorial fuzz vendor-check readme-check
 make browser-assets   # regenerate every browser artifact (bundles, pages, tf.js) — none are in git
 ```
@@ -148,7 +251,7 @@ ziglang wheel (translated target triple, `-g0`). Real CI uses real clang.
 
 ## The rules that shaped the code (do not regress them)
 
-Full list: `docs/architecture.md` (11 invariants). The load-bearing ones:
+Full list: `docs/architecture.md` (12 invariants). The load-bearing ones:
 numpy backend is the semantic reference; Keras' own tests are the referee;
 NO silent numpy fallbacks in differentiable paths (loud NotImplementedError);
 copy-on-convert (tinygrad wraps numpy zero-copy + lazy reads);
@@ -184,7 +287,8 @@ loader patch-table anchor in the same change.
    upstream-PR bucket). Zero regressions at every wave; math_test 208/0/4
    throughout. NOTE: tutorial's loud-stub demo now uses ops.unique (its
    rot90 demo broke when rot90 landed — the executable tutorial caught it).
-4. Dev tooling landed 2026-08-03: uv + ruff (line-length 120, _backend/
+4. Dev tooling landed 2026-08-03: uv + ruff (line-length 120, the backend
+   sources
    excluded — it must stay byte-identical to the clone), Makefile
    (verify/tutorial/smoke/fuzz/vendor-check), executable TUTORIAL.md
    enforced by tests/test_tutorial.py, CI rewritten onto uv+make.
@@ -217,6 +321,19 @@ loader patch-table anchor in the same change.
    float8); validation scripts preserved in the session scratchpad.
    test/predict paths still eager — the remaining smaller lever.
 8. Upstream float8 test branch (keras test files) — part of any upstream PR.
+9. Keras 3.16 / `pluggable_backend` drift (2026-09-21, static check —
+   `docs/upstream/keras-master-and-branch-status-2026-09-21.md`): master
+   moved every backend's ops into an `ops/` subpackage (`backend.ops.numpy.x`)
+   and rewrote the `DynamicBackend` anchor — the package now HAS that shape
+   (`keras_tinygrad/src/ops/`, both spellings exported, the loader's
+   patches import `keras_tinygrad.src` directly, no alias), so only the
+   anchor is left for 3.16; the branch resolves plugins from a hard-coded frozenset
+   (`tinygrad` not in it) and OpenVINO now lives out of tree in
+   `keras-team/keras-openvino`, the layout to mirror. Landed alongside:
+   the master-only ops (`copysign`, `float_power`, `cov`, `lgamma`,
+   `gammainc`; `tests/test_ops_beyond_pin.py`), `core.MissingOpError`
+   (master's `hasattr` probes on the backend), the shim's `BackendLayer`
+   name and the removed `src/export.py` (branch protocol).
 
 ## Plugin-backends PoC (2026-08-10) — WORKING
 

@@ -17,9 +17,10 @@ from keras.src.backend.common.backend_utils import (
     compute_conv_transpose_output_crops_for_torch,
 )
 from keras.src.backend.common.dtypes import result_type
-from keras.src.backend.tinygrad.core import convert_to_tensor
-from keras.src.backend.tinygrad.core import to_keras_dtype
-from keras.src.backend.tinygrad.core import to_tinygrad_dtype
+from keras_tinygrad.src.ops.core import MissingOpError
+from keras_tinygrad.src.ops.core import convert_to_tensor
+from keras_tinygrad.src.ops.core import to_keras_dtype
+from keras_tinygrad.src.ops.core import to_tinygrad_dtype
 
 
 def _f(x):
@@ -1307,6 +1308,8 @@ def ctc_decode(
 def __getattr__(name):
     if name.startswith("__") and name.endswith("__"):
         raise AttributeError(name)
-    raise NotImplementedError(
+    # NotImplementedError AND AttributeError: loud when called, absent when
+    # probed with hasattr (see core.MissingOpError).
+    raise MissingOpError(
         f"tinygrad backend: `keras.ops.{name}` is not implemented yet"
     )

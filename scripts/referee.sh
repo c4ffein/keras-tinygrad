@@ -19,6 +19,14 @@
 #   KERAS_VERSION=3.15.0 scripts/referee.sh  # pin override
 #   PYTEST_ARGS="-x -k dense" scripts/referee.sh  # a subset run, judged like custom paths
 #
+# Guard rails (2026-09-21: a runaway lazy graph in one linalg test pinned the
+# whole box — load average 174 — until the process was killed from the
+# host). The run is niced, its address space is capped (REFEREE_MEM_MB,
+# default 8192: a TF-collecting run peaks at 3.9 GB of address space / 0.7 GB
+# RSS; 0 disables), and every test has a wall-clock budget
+# (REFEREE_TEST_TIMEOUT seconds, default 900; 0 disables) — so a runaway is
+# ONE red test with a traceback, and the rest of the tree still runs.
+#
 # Runtime: the layers tree is ~25 min single-process. CI runs it weekly and
 # on demand (.github/workflows/referee.yml); locally, `make referee`.
 set -euo pipefail
@@ -31,7 +39,12 @@ DEFAULT_PATHS=(keras/src/layers)
 
 KERAS_VERSION=${KERAS_VERSION:-$(uv run --project "$REPO" python -c \
   'import importlib.metadata as m; print(m.version("keras"))')}
-TINYGRAD_PIN=$(grep -o '"tinygrad[^"]*"' "$REPO/pyproject.toml" | head -1 | tr -d '"')
+# The DEPENDENCY string, i.e. one with a version operator: the bare
+# `"tinygrad"` in pyproject's keywords comes first in the file, and until
+# 2026-09-21 that is what this matched — the venv got the latest tinygrad
+# (0.14.0), not the pin.
+TINYGRAD_PIN=$(grep -oE '"tinygrad[<>=!~][^"]*"' "$REPO/pyproject.toml" | head -1 | tr -d '"')
+[ -n "$TINYGRAD_PIN" ] || { echo "referee: no tinygrad version pin found in pyproject.toml"; exit 2; }
 TREE=$REFEREE_DIR/keras-v$KERAS_VERSION
 VENV=$REFEREE_DIR/venv-$KERAS_VERSION
 
@@ -50,9 +63,22 @@ if [ ! -x "$VENV/bin/python" ]; then
   uv venv --quiet --python "$REFEREE_PYTHON" "$VENV"
   uv pip install --quiet --python "$VENV/bin/python" \
     "keras==$KERAS_VERSION" "$TINYGRAD_PIN" pytest numpy scipy pillow pandas \
-    tensorflow-cpu grain "jax[cpu]"
+    tensorflow-cpu grain "jax[cpu]" pytest-timeout
   uv pip install --quiet --python "$VENV/bin/python" --no-deps -e "$REPO"
 fi
+
+# Cheap and idempotent: an existing venv may hold a tinygrad outside the pin
+# (see TINYGRAD_PIN above).
+uv pip install --quiet --python "$VENV/bin/python" "$TINYGRAD_PIN"
+# A venv built before the guard rails existed has no pytest-timeout.
+if ! "$VENV/bin/python" -c "import pytest_timeout" 2>/dev/null; then
+  uv pip install --quiet --python "$VENV/bin/python" pytest-timeout
+fi
+
+REFEREE_MEM_MB=${REFEREE_MEM_MB:-8192}
+REFEREE_TEST_TIMEOUT=${REFEREE_TEST_TIMEOUT:-900}
+[ "$REFEREE_MEM_MB" -gt 0 ] && ulimit -v $((REFEREE_MEM_MB * 1024))
+ulimit -c 0  # no core files (see the shutdown-abort note below: ~1 GB each)
 
 cd "$TREE"
 # Preflight: the TREE's keras must win over the venv's installed wheel
@@ -62,14 +88,17 @@ import keras_tinygrad, keras, os
 assert keras.__file__.startswith(os.getcwd()), f"wrong keras: {keras.__file__}"
 print(f"referee: keras {keras.__version__} from {keras.__file__}")
 print(f"referee: backend {keras.backend.backend()}")
+import importlib.metadata as m
+print(f"referee: tinygrad {m.version('tinygrad')}")
 PY
 
 PATHS=("$@"); [ ${#PATHS[@]} -eq 0 ] && PATHS=("${DEFAULT_PATHS[@]}")
 LOG=$REFEREE_DIR/last-run.log
 set +e
 # shellcheck disable=SC2086
-KERAS_BACKEND=tinygrad "$VENV/bin/python" -m pytest -p keras_tinygrad \
-  "${PATHS[@]}" -q --no-header -p no:cacheprovider ${PYTEST_ARGS:-} 2>&1 | tee "$LOG" \
+KERAS_BACKEND=tinygrad nice -n 10 "$VENV/bin/python" -m pytest -p keras_tinygrad \
+  "${PATHS[@]}" -q --no-header -p no:cacheprovider --timeout="$REFEREE_TEST_TIMEOUT" \
+  ${PYTEST_ARGS:-} 2>&1 | tee "$LOG" \
   | grep -E "^FAILED |^ERROR |^=+ .*(passed|failed|error)" | tail -12
 PYTEST_STATUS=${PIPESTATUS[0]}
 set -e
@@ -82,8 +111,19 @@ echo
 echo "referee: keras v$KERAS_VERSION  ${PATHS[*]}"
 echo "referee: ${TALLY:-NO PYTEST SUMMARY LINE — crash? see $LOG}"
 
+# A test file that imports tensorflow (ops/image_test, the preprocessing
+# tree) makes the interpreter abort AT EXIT with tinygrad 0.13 in the same
+# process — `free(): invalid pointer`, exit 134, after pytest has printed
+# its complete summary; same on the unmodified tree, no test affected
+# (2026-09-21; invisible before because the venv ran tinygrad 0.14, see
+# TINYGRAD_PIN). Only THAT shape is tolerated, loudly: any abort without a
+# final summary line is still a crash.
 if [ "$PYTEST_STATUS" -ge 2 ]; then
-  echo "referee: pytest crashed/aborted (exit $PYTEST_STATUS) — see $LOG"; exit "$PYTEST_STATUS"
+  if [ "$PYTEST_STATUS" -eq 134 ] && [ -n "$TALLY" ] && tail -3 "$LOG" | grep -q "free(): invalid pointer"; then
+    echo "referee: WARNING — interpreter aborted at exit (134, free(): invalid pointer) AFTER the complete summary; judging the run by its results"
+  else
+    echo "referee: pytest crashed/aborted (exit $PYTEST_STATUS) — see $LOG"; exit "$PYTEST_STATUS"
+  fi
 fi
 if grep -qE "^ERROR " "$LOG"; then
   echo "referee: COLLECTION/SETUP ERRORS — see $LOG"; exit 1

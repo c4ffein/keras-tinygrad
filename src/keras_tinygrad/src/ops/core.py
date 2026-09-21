@@ -18,6 +18,22 @@ from keras.src.backend.common.keras_tensor import KerasTensor
 from keras.src.backend.common.stateless_scope import StatelessScope
 from keras.src.backend.common.symbolic_scope import SymbolicScope
 
+
+class MissingOpError(NotImplementedError, AttributeError):
+    """Raised by the backend modules' PEP 562 ``__getattr__`` for an op that
+    is not implemented.
+
+    It IS a ``NotImplementedError``, so a direct call stays loud (no silent
+    fallback, ever). It is ALSO an ``AttributeError``, so ``hasattr(module,
+    name)`` / ``getattr(module, name, default)`` report absence instead of
+    crashing the probe: keras master (3.16-dev) checks
+    ``hasattr(backend.ops.numpy, "copysign")`` and friends before choosing
+    between the backend's op and its own backend-agnostic fallback, and a
+    plain ``NotImplementedError`` escaping that probe would fail even the
+    ops keras could have computed without us.
+    """
+
+
 SUPPORTS_SPARSE_TENSORS = False
 SUPPORTS_RAGGED_TENSORS = False
 SUPPORTS_COMPLEX_DTYPES = False
@@ -927,6 +943,15 @@ def custom_gradient_tape():
         yield _custom_gradient_tape.blocks
     finally:
         _custom_gradient_tape.blocks = prev
+
+
+def in_custom_gradient_tape():
+    """True while the trainer is building a differentiated step. Ops with
+    host-side validity checks skip them here: in tinygrad 0.13 a host read
+    materializes the `.contiguous()` nodes upstream of it, and gradients
+    through a materialized node come back as silent zeros (linalg's module
+    docstring has the receipts)."""
+    return getattr(_custom_gradient_tape, "blocks", None) is not None
 
 
 class custom_gradient:
