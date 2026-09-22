@@ -1,4 +1,5 @@
 import json
+import re
 from collections import OrderedDict
 from typing import Dict, List, Optional, Tuple
 
@@ -51,9 +52,27 @@ def compile_net(
         arg_uops = [b for b in call.src[1:] if not b.is_bound_var]
         prg = to_program(call.src[0], Device[arg_uops[0].device].renderer)
         info = prg.arg
-        functions[info.function_name] = prg.src[2].arg
+        fname, src = info.function_name, prg.src[2].arg
+        if functions.get(fname, src) != src:
+            # tinygrad 0.14 reuses shape-derived kernel names across distinct
+            # programs in one trace; keying this dict on the shared name kept
+            # only the last body while every statement still referenced it
+            # (WebGPU: bind-group layouts built per statement no longer match
+            # the surviving shader — GPUPipelineError at setup). Suffix until
+            # the name is unique, renaming whole-word uses in the body too
+            # (the C path calls kernels by name; WGSL entry points are all
+            # `main`, so there the body rename is a no-op).
+            base, i = fname, 1
+            while True:
+                fname = f"{base}_ktg{i}"
+                renamed = re.sub(rf"\b{re.escape(base)}\b", fname, src)
+                if functions.get(fname, renamed) == renamed:
+                    src = renamed
+                    break
+                i += 1
+        functions[fname] = src
         cargs = [name_of(bu, i == 0) for i, bu in enumerate(arg_uops)] + list(info.vars)
-        statements.append((info.function_name, cargs, info.global_size, info.local_size))
+        statements.append((fname, cargs, info.global_size, info.local_size))
 
     return functions, statements, {name: (size, dtype, key) for name, size, dtype, key in bufs.values()}, bufs_to_save
 
