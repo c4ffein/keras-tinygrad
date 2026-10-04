@@ -97,6 +97,21 @@ DEFAULT_OPS = (
     "concatenate",
     "conv",
     "argmax",
+    # linalg — decompositions and solves; well-conditioned inputs by
+    # construction (see the _s_lin* samplers). Sign-ambiguous factors
+    # (eigh's V, svd's U/Vh, qr's Q/R) are compared through OP_POST.
+    "inv",
+    "det",
+    "solve",
+    "solve_triangular",
+    "lu_factor",
+    "cholesky",
+    "eigh",
+    "svd",
+    "qr",
+    "lstsq",
+    "pinv",
+    "norm",
 )
 GRAD_OPS = (
     "matmul",
@@ -108,6 +123,21 @@ GRAD_OPS = (
     "mean",
     "exp",
     "conv",
+    # linalg gradients: these were silently ZERO until 2026-09-21 (a realize
+    # inside the loops cut the graph; HANDOFF) and no fuzz case existed to
+    # notice. Finite differences (--slow) are the check that would have.
+    "inv",
+    "det",
+    "solve",
+    "solve_triangular",
+    "lu_factor",
+    "cholesky",
+    "eigh",
+    "svd",
+    "qr",
+    "lstsq",
+    "pinv",
+    "norm",
 )
 DEFAULT_LAYERS = (
     "Dense",
@@ -140,6 +170,7 @@ class Case:
     weights: list[np.ndarray] = field(default_factory=list)
     list_input: bool = False
     grad_wrt: list[int] = field(default_factory=list)
+    post: str | None = None  # child-side output transform (OP_POST), e.g. "abs"
 
     def spec(self, fd: bool) -> dict[str, Any]:
         """JSON-safe description sent to a child (arrays travel via npz)."""
@@ -151,6 +182,7 @@ class Case:
             "n_inputs": len(self.inputs),
             "n_weights": len(self.weights),
             "list_input": self.list_input,
+            "post": self.post,
         }
         if self.grad_wrt:
             d["grad"] = {"wrt": self.grad_wrt, "fd": fd, "eps_scale": FD_EPS_SCALE}
@@ -316,6 +348,132 @@ def _s_argmax(rng: Rng, dt: str, tiny: bool) -> Sampled:
     return [x], {"axis": _ri(rng, -x.ndim, x.ndim - 1)}, False
 
 
+# --- linalg samplers -------------------------------------------------------
+# Conditioning is by construction, never by luck: diagonally dominant
+# (`randn * 0.3 + n * I`) for the solves/inverses/LU, SPD (`M @ M.T + n * I`,
+# symmetrized bit-exactly) for cholesky/eigh, and a shifted top block for the
+# rectangular lstsq/pinv inputs. numpy's linalg rejects float16, so linalg
+# cases draw float32/float64 only. Grad cases (tiny) stay 2x2..3x3, unbatched,
+# k <= 2: finite differences cost one forward per input element.
+
+
+def _lin_dt(dt: str) -> str:
+    return "float32" if dt == "float16" else dt
+
+
+def _lin_n(rng: Rng, tiny: bool) -> int:
+    return _ri(rng, 2, 3) if tiny else _ri(rng, 2, 5)
+
+
+def _lin_batch(rng: Rng, tiny: bool) -> tuple[int, ...]:
+    if tiny or rng.random() >= 0.4:
+        return ()
+    return (_ri(rng, 1, 3),)
+
+
+def _lin_dominant(rng: Rng, batch: tuple[int, ...], n: int, dt: str) -> np.ndarray:
+    return (rng.standard_normal(batch + (n, n)) * 0.3 + n * np.eye(n)).astype(dt)
+
+
+def _lin_spd(rng: Rng, batch: tuple[int, ...], n: int, dt: str) -> np.ndarray:
+    m = rng.standard_normal(batch + (n, n))
+    a = m @ np.swapaxes(m, -1, -2) + n * np.eye(n)
+    a = (a + np.swapaxes(a, -1, -2)) / 2.0  # bit-exact symmetry
+    return a.astype(dt)
+
+
+def _lin_tall(rng: Rng, m: int, n: int, dt: str) -> np.ndarray:
+    """(m, n) with a shifted top n x n block: full column rank, cond ~ O(1)."""
+    a = rng.standard_normal((m, n)) * 0.3
+    a[:n] += n * np.eye(n)
+    return a.astype(dt)
+
+
+def _s_lin_square(kind: str, batched: bool = True) -> OpSampler:
+    def sampler(rng: Rng, dt: str, tiny: bool) -> Sampled:
+        dt = _lin_dt(dt)
+        n = _lin_n(rng, tiny)
+        batch = _lin_batch(rng, tiny) if batched else ()
+        a = _lin_spd(rng, batch, n, dt) if kind == "spd" else _lin_dominant(rng, batch, n, dt)
+        return [a], {}, False
+
+    return sampler
+
+
+def _s_lin_cholesky(rng: Rng, dt: str, tiny: bool) -> Sampled:
+    dt = _lin_dt(dt)
+    n = _lin_n(rng, tiny)
+    return [_lin_spd(rng, _lin_batch(rng, tiny), n, dt)], {"upper": bool(rng.random() < 0.5)}, False
+
+
+def _s_lin_solve(rng: Rng, dt: str, tiny: bool) -> Sampled:
+    dt = _lin_dt(dt)
+    n = _lin_n(rng, tiny)
+    batch = _lin_batch(rng, tiny)
+    k = _ri(rng, 1, 2 if tiny else 3)
+    a = _lin_dominant(rng, batch, n, dt)
+    return [a, _rand(rng, batch + (n, k), dt)], {}, False
+
+
+def _s_lin_solve_triangular(rng: Rng, dt: str, tiny: bool) -> Sampled:
+    dt = _lin_dt(dt)
+    n = _lin_n(rng, tiny)
+    k = _ri(rng, 1, 2 if tiny else 3)
+    lower = bool(rng.random() < 0.5)
+    a = _lin_dominant(rng, (), n, dt)
+    a = (np.tril(a) if lower else np.triu(a)).astype(dt)
+    return [a, _rand(rng, (n, k), dt)], {"lower": lower}, False
+
+
+def _s_lin_svd(rng: Rng, dt: str, tiny: bool) -> Sampled:
+    dt = _lin_dt(dt)
+    m, n = _lin_n(rng, tiny), _lin_n(rng, tiny)
+    a = _rand(rng, _lin_batch(rng, tiny) + (m, n), dt)
+    # full_matrices=False: with full matrices the null-space columns of U/Vh
+    # are arbitrary and no post-transform makes them comparable.
+    return [a], {"full_matrices": False, "compute_uv": True}, False
+
+
+def _s_lin_qr(rng: Rng, dt: str, tiny: bool) -> Sampled:
+    dt = _lin_dt(dt)
+    n = _lin_n(rng, tiny)
+    m = _ri(rng, n, n + (0 if tiny else 2))
+    return [_rand(rng, _lin_batch(rng, tiny) + (m, n), dt)], {"mode": "reduced"}, False
+
+
+def _s_lin_lstsq(rng: Rng, dt: str, tiny: bool) -> Sampled:
+    dt = _lin_dt(dt)
+    n = _lin_n(rng, tiny)
+    m = _ri(rng, n, n + (1 if tiny else 2))
+    k = _ri(rng, 1, 2 if tiny else 3)
+    return [_lin_tall(rng, m, n, dt), _rand(rng, (m, k), dt)], {}, False
+
+
+def _s_lin_pinv(rng: Rng, dt: str, tiny: bool) -> Sampled:
+    dt = _lin_dt(dt)
+    n = _lin_n(rng, tiny)
+    m = _ri(rng, n, n + (1 if tiny else 2))
+    a = _lin_tall(rng, m, n, dt)
+    if rng.random() < 0.5:
+        a = np.ascontiguousarray(a.T)  # wide: the other pseudo-inverse branch
+    return [a], {}, False
+
+
+def _s_lin_norm(rng: Rng, dt: str, tiny: bool) -> Sampled:
+    dt = _lin_dt(dt)
+    n = _lin_n(rng, tiny)
+    a = _rand(rng, _lin_batch(rng, tiny) + (n, n), dt)
+    kwargs: dict[str, Any] = [
+        {},  # Frobenius over everything
+        {"ord": 2, "axis": -1},
+        {"ord": 1, "axis": -1, "keepdims": True},
+        {"ord": "fro", "axis": [-2, -1]},
+        {"ord": 2, "axis": [-2, -1]},  # spectral norm: through the SVD
+        {"ord": "nuc", "axis": [-2, -1]},
+    ][_ri(rng, 0, 5)]
+    return [a], kwargs, False
+
+
 OP_SAMPLERS: dict[str, OpSampler] = {
     "matmul": _s_matmul,
     "add": _s_binary(),
@@ -340,7 +498,27 @@ OP_SAMPLERS: dict[str, OpSampler] = {
     "concatenate": _s_concatenate,
     "conv": _s_conv,
     "argmax": _s_argmax,
+    "inv": _s_lin_square("dominant"),
+    "det": _s_lin_square("dominant"),
+    "solve": _s_lin_solve,
+    "solve_triangular": _s_lin_solve_triangular,
+    "lu_factor": _s_lin_square("dominant", batched=False),  # scipy: 2-D only
+    "cholesky": _s_lin_cholesky,
+    "eigh": _s_lin_square("spd"),
+    "svd": _s_lin_svd,
+    "qr": _s_lin_qr,
+    "lstsq": _s_lin_lstsq,
+    "pinv": _s_lin_pinv,
+    "norm": _s_lin_norm,
 }
+
+# Output transforms applied IN THE CHILD (keras.ops, so the grad loss sees
+# them too) before comparison — for factors defined only up to a per-column
+# sign: eigh's V, svd's U/Vh, qr's Q/R. "abs" takes |.| of every float
+# output (eigenvalues/singular values are non-negative or sign-free
+# anyway); with distinct eigen/singular values (random inputs, a.s.) the
+# result is unique, and sum(|V|) is a sign-invariant, differentiable loss.
+OP_POST: dict[str, str] = {"eigh": "abs", "svd": "abs", "qr": "abs"}
 
 
 # ---------------------------------------------------------------------------
@@ -460,11 +638,11 @@ def generate_case(
         inputs, kwargs, list_input = OP_SAMPLERS[name](rng, "float32", tiny=True)
         wrt = [i for i, a in enumerate(inputs) if a.dtype.kind == "f"]
         cid = f"{index:04d}-grad-{name}"
-        return Case(cid, "grad", name, kwargs, inputs, list_input=list_input, grad_wrt=wrt)
+        return Case(cid, "grad", name, kwargs, inputs, list_input=list_input, grad_wrt=wrt, post=OP_POST.get(name))
     name = ops[_ri(rng, 0, len(ops) - 1)]
     inputs, kwargs, list_input = OP_SAMPLERS[name](rng, _pick_dtype(rng, tiny=False), tiny=False)
     cid = f"{index:04d}-op-{name}"
-    return Case(cid, "op", name, kwargs, inputs, list_input=list_input)
+    return Case(cid, "op", name, kwargs, inputs, list_input=list_input, post=OP_POST.get(name))
 
 
 def generate_cases(cfg: "Config") -> list[Case]:

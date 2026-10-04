@@ -32,7 +32,9 @@ where both are importable.
 - **op** — single `keras.ops.*` calls over a curated list (`matmul`, `conv`,
   `softmax`, elementwise, reductions, shape ops, `argmax`, …) with randomized
   shapes, dtypes (float32/float16/float64 mix), axes and params drawn from
-  sane distributions.
+  sane distributions. Since 2026-09-28 this includes the **linalg** family
+  (`inv`, `det`, `solve`, `solve_triangular`, `lu_factor`, `cholesky`,
+  `eigh`, `svd`, `qr`, `lstsq`, `pinv`, `norm`) — see "Linalg cases" below.
 - **layer** — single-layer forward passes (`Dense`, `Conv2D`,
   `BatchNormalization`, `LayerNormalization`, `Embedding`, `SimpleRNN`) with
   weights **generated in the parent** and installed via `layer.set_weights`,
@@ -49,6 +51,45 @@ where both are importable.
 
   If the reference is `numpy` (no autograd) and `--slow` is not given,
   gradient cases are auto-skipped with a printed note.
+
+### Linalg cases
+
+Why they exist: the backend's linalg gradients were silently **zero** for
+inv / det / solve / lu_factor / cholesky / eigh / svd / lstsq / pinv until
+2026-09-21 (a realize inside the python loops cut the graph — HANDOFF), and
+no fuzz case existed to notice. The finite-difference grad cases are the
+check that would have: with every linalg output detached (an out-of-tree
+sabotage stand-in for that bug) all 24/24 sampled grad cases fail at
+~50x tolerance; the real backend passes 60/60 with worst ratio 0.14x.
+
+How they stay honest under float32 tolerances without special-casing:
+
+- **Conditioning by construction, not by luck.** Solves/inverses/LU/det take
+  diagonally dominant matrices (`randn * 0.3 + n * I`); cholesky/eigh take
+  SPD (`M @ M.T + n * I`, symmetrized bit-exactly); lstsq/pinv take
+  rectangular inputs whose top `n x n` block is shifted the same way. The
+  backend computes every op in float64 internally and casts back, so the
+  forward diff vs numpy is float32 rounding only — no tolerance widening
+  (`--tol-scale` stays 1).
+- **Sign-ambiguous factors compare through a transform.** eigh's `V`,
+  svd's `U`/`Vh` and qr's `Q`/`R` are defined up to a per-column sign, so
+  the child applies `|.|` to every float output of those three ops
+  (`OP_POST` in the parent, `POST` in the child) before comparison — unique
+  when the eigen/singular values are distinct (random inputs, a.s.). The
+  transform sits inside the forward, so the gradient loss
+  `sum(w) + sum(|V|)` is sign-invariant too, and finite differences of it
+  are meaningful. svd runs with `full_matrices=False` (the null-space
+  columns of a full `U` are arbitrary and nothing makes them comparable).
+- **Integer outputs are exact and constant.** `lu_factor`'s pivots must
+  match scipy's exactly; the gradient loss sums float outputs only.
+- **Shapes.** Forward: `n` in 2..5, a leading batch dim (1..3) with
+  probability 0.4 where the numpy reference supports stacks (not
+  `lu_factor`, `lstsq`, `solve_triangular` — scipy is 2-D there); float32
+  or float64 (numpy's linalg rejects float16). Gradient cases: 2x2..3x3,
+  unbatched, `k <= 2` right-hand sides — FD is one forward per input
+  element.
+- **norm** cycles through Frobenius, vector 1/2-norms along an axis, and
+  the matrix `fro` / spectral (`ord=2`, through the SVD) / nuclear norms.
 
 ### Comparison and tolerances
 
@@ -147,7 +188,10 @@ verdict verbatim.
 
 Add an op: write a sampler in `parity_fuzz.py` returning
 `(inputs, kwargs, list_input)` and register it in `OP_SAMPLERS` (add it to
-`GRAD_OPS` if differentiable — keep grad shapes tiny). Add a layer: a
-sampler returning `(ctor_kwargs, [input], weights)` registered in
-`LAYER_SAMPLERS`; the weights list must match the layer's
-`get_weights()` order exactly. The child needs no changes for either.
+`GRAD_OPS` if differentiable — keep grad shapes tiny). If its outputs are
+only defined up to a symmetry, name a child-side transform in `OP_POST`
+(today: `"abs"`); a kwarg that numpy insists on receiving as a tuple goes
+in the child's `TUPLE_KWARGS`. Add a layer: a sampler returning
+`(ctor_kwargs, [input], weights)` registered in `LAYER_SAMPLERS`; the
+weights list must match the layer's `get_weights()` order exactly. The
+child needs no changes for a plain op or layer.

@@ -56,12 +56,35 @@ def case_weights(case: dict[str, Any], arrays: dict[str, np.ndarray]) -> list[np
     return [arrays[f"{cid}__w{i}"] for i in range(case["n_weights"])]
 
 
+# kwargs that must arrive as tuples (JSON only has lists): numpy's
+# `linalg.norm` rejects a list axis.
+TUPLE_KWARGS = {"norm": ("axis",)}
+
+
+def _is_float(t: Any) -> bool:
+    return "float" in str(getattr(t, "dtype", ""))
+
+
+def _post_abs(keras: Any, outs: list[Any]) -> list[Any]:
+    return [keras.ops.abs(o) if _is_float(o) else o for o in outs]
+
+
+# Output transforms named by the parent's OP_POST — applied inside the
+# forward so both the compared outputs AND the gradient loss see them
+# (sign-ambiguous factors: |V|, |U|, |Q|, ...).
+POST = {"abs": _post_abs}
+
+
 def build_op_forward(keras: Any, case: dict[str, Any]) -> Forward:
     fn = getattr(keras.ops, case["name"])
-    kwargs = case["kwargs"]
+    kwargs = dict(case["kwargs"])
+    for key in TUPLE_KWARGS.get(case["name"], ()):
+        if isinstance(kwargs.get(key), list):
+            kwargs[key] = tuple(kwargs[key])
+    post = POST[case["post"]] if case.get("post") else (lambda _k, outs: outs)
     if case.get("list_input"):
-        return lambda *xs: _as_list(fn(list(xs), **kwargs))
-    return lambda *xs: _as_list(fn(*xs, **kwargs))
+        return lambda *xs: post(keras, _as_list(fn(list(xs), **kwargs)))
+    return lambda *xs: post(keras, _as_list(fn(*xs, **kwargs)))
 
 
 def build_layer_forward(keras: Any, case: dict[str, Any], weights: list[np.ndarray], sample: np.ndarray) -> Forward:
@@ -78,8 +101,13 @@ def build_layer_forward(keras: Any, case: dict[str, Any], weights: list[np.ndarr
 # ---------------------------------------------------------------------------
 
 
+def _float_outs(outs: list[Any]) -> list[Any]:
+    """The differentiable outputs: integer ones (lu_factor's pivots) are constants."""
+    return [o for o in outs if _is_float(o)]
+
+
 def analytic_grads(backend: str, forward: Forward, inputs: list[np.ndarray], wrt: list[int]) -> list[np.ndarray]:
-    """Backend-native autograd of loss = sum of all outputs, w.r.t. inputs[wrt]."""
+    """Backend-native autograd of loss = sum of all float outputs, w.r.t. inputs[wrt]."""
     if backend == "tensorflow":
         import tensorflow as tf
 
@@ -87,7 +115,7 @@ def analytic_grads(backend: str, forward: Forward, inputs: list[np.ndarray], wrt
         with tf.GradientTape() as tape:
             for i in wrt:
                 tape.watch(ts[i])
-            outs = forward(*ts)
+            outs = _float_outs(forward(*ts))
             loss = tf.add_n([tf.reduce_sum(o) for o in outs])
         grads = tape.gradient(loss, [ts[i] for i in wrt])
         return [np.asarray(g) for g in grads]
@@ -97,7 +125,7 @@ def analytic_grads(backend: str, forward: Forward, inputs: list[np.ndarray], wrt
         ts = [torch.from_numpy(x.copy()) for x in inputs]
         for i in wrt:
             ts[i].requires_grad_(True)
-        outs = forward(*ts)
+        outs = _float_outs(forward(*ts))
         loss = sum(o.sum() for o in outs)
         loss.backward()
         return [ts[i].grad.detach().cpu().numpy() for i in wrt]
@@ -106,7 +134,7 @@ def analytic_grads(backend: str, forward: Forward, inputs: list[np.ndarray], wrt
         import jax.numpy as jnp
 
         def loss_fn(*xs: Any) -> Any:
-            return sum(jnp.sum(o) for o in forward(*xs))
+            return sum(jnp.sum(o) for o in _float_outs(forward(*xs)))
 
         grads = jax.grad(loss_fn, argnums=tuple(wrt))(*[jnp.asarray(x) for x in inputs])
         return [np.asarray(g) for g in grads]
@@ -116,7 +144,7 @@ def analytic_grads(backend: str, forward: Forward, inputs: list[np.ndarray], wrt
         # tinygrad 0.13: no requires_grad constructor kwarg; gradients come
         # from the explicit `loss.gradient(*targets)` API.
         ts = [Tensor(x.copy()) for x in inputs]
-        outs = forward(*ts)
+        outs = _float_outs(forward(*ts))
         sums = [o.sum() for o in outs]
         loss = sums[0]
         for s in sums[1:]:
@@ -136,7 +164,7 @@ def fd_grads(
     """Central finite differences of loss = sum of all outputs. Forward-only."""
 
     def loss_of(xs: list[np.ndarray]) -> float:
-        return float(sum(np.asarray(to_numpy(o), dtype=np.float64).sum() for o in forward(*xs)))
+        return float(sum(np.asarray(to_numpy(o), dtype=np.float64).sum() for o in _float_outs(forward(*xs))))
 
     grads: list[np.ndarray] = []
     for i in wrt:
