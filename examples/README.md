@@ -36,6 +36,12 @@ import keras
 All scripts accept `--epochs` and `--batch-size` where sensible; defaults are
 tuned to finish quickly on a CPU device while still showing the loss move.
 
+Every script ends in an assertion about its own result (reconstruction beats
+noise, next-char loss below chance, softmax rows sum to 1, int8 drift small),
+and CI runs them all at their smallest size — `make examples` (1 epoch,
+small batches, synthetic data, no network; `make smoke` covers `mlp_smoke.py`).
+A script that stops working is a red job, not a stale page.
+
 QR-based initializers (e.g. `Orthogonal`, SimpleRNN's default recurrent
 initializer) are supported since the linalg wave — `char_rnn.py` uses the
 default on purpose, as a standing regression test.

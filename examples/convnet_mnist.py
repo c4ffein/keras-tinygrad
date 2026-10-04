@@ -72,7 +72,7 @@ def main() -> None:
         loss="sparse_categorical_crossentropy",
         metrics=["accuracy"],
     )
-    model.fit(
+    hist = model.fit(
         x_train,
         y_train,
         epochs=args.epochs,
@@ -87,8 +87,17 @@ def main() -> None:
         print("(synthetic labels are random — accuracy near 0.10 is expected)")
 
     # Sanity: predicted class distribution over a handful of test digits.
-    probs = model.predict(x_test[:8], verbose=0)
+    probs = np.asarray(model.predict(x_test[:8], verbose=0))
     print("predicted classes:", np.argmax(probs, axis=-1).tolist())
+
+    # Random labels cannot be learned, so accuracy proves nothing here; what
+    # the conv/pool/softmax kernels CAN be held to is finite losses and a
+    # proper softmax head (each row a distribution over the 10 classes).
+    assert all(np.isfinite(v) for v in hist.history["loss"]) and np.isfinite(loss), "non-finite loss"
+    assert probs.shape == (8, 10) and np.allclose(probs.sum(axis=-1), 1.0, atol=1e-3), "softmax rows must sum to 1"
+    if args.real:
+        assert acc > 0.9, f"real MNIST accuracy {acc:.3f} — the convnet stopped learning digits"
+    print("OK: finite losses, softmax head well-formed")
 
 
 if __name__ == "__main__":

@@ -94,12 +94,20 @@ def main() -> None:
         loss="sparse_categorical_crossentropy",
         metrics=["accuracy"],
     )
-    model.fit(x, y, epochs=args.epochs, batch_size=args.batch_size, verbose=2)
+    hist = model.fit(x, y, epochs=args.epochs, batch_size=args.batch_size, verbose=2)
 
     seed = CORPUS[:SEQ_LEN]
     text = generate(model, vocab, seed, length=120, temperature=args.temperature)
     print(f"--- sample (seed={seed!r}, temperature={args.temperature}) ---")
     print(text)
+
+    # A model that learned nothing sits at the uniform-guess loss ln(vocab);
+    # even one epoch on this corpus lands well below it. (Sampled text is
+    # judged by eye; this is the part a script can check.)
+    final_loss = float(hist.history["loss"][-1])
+    assert np.isfinite(final_loss) and final_loss < np.log(len(vocab)), f"loss {final_loss:.3f} is at chance level"
+    assert len(text) == SEQ_LEN + 120 and set(text) <= set(vocab), "sampler produced characters outside the vocab"
+    print("OK: next-char loss below chance, sampler stays inside the vocab")
 
 
 if __name__ == "__main__":
