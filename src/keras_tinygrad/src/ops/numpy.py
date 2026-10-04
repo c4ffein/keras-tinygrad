@@ -22,6 +22,7 @@ from keras_tinygrad.src.ops.core import ComplexTensor
 from keras_tinygrad.src.ops.core import MissingOpError
 from keras_tinygrad.src.ops.core import _COMPLEX_INTEROP_MSG
 from keras_tinygrad.src.ops.core import convert_to_tensor
+from keras_tinygrad.src.ops.core import host_read
 from keras_tinygrad.src.ops.core import to_keras_dtype
 from keras_tinygrad.src.ops.core import to_tinygrad_dtype
 
@@ -43,7 +44,7 @@ def _tensor_bool(self):
             "The truth value of a Tensor with more than one element is "
             "ambiguous. Use `.any()` or `.all()`."
         )
-    return builtins.bool(self.item())
+    return builtins.bool(host_read(self).item())
 
 
 Tensor.__bool__ = _tensor_bool
@@ -55,7 +56,7 @@ Tensor.__bool__ = _tensor_bool
 # tensor `__array__`) — op implementations must still never round-trip
 # through numpy themselves.
 def _tensor_array(self, dtype=None, copy=None):
-    out = self.detach().numpy()
+    out = host_read(self)
     return out.astype(dtype) if dtype is not None else out
 
 
@@ -75,7 +76,7 @@ def _tensor_scalar(convert):
             raise TypeError(
                 "Only one-element tensors can be converted to Python scalars"
             )
-        return convert(self.item())
+        return convert(host_read(self).item())
 
     return method
 
@@ -957,12 +958,12 @@ def bincount(x, weights=None, minlength=0, sparse=False):
     # numpy raises for negative values; the one-hot match below would
     # silently drop them. This op already realizes a scalar for the
     # output length, so the min check costs one more scalar read.
-    if builtins.int(x.min().numpy()) < 0:
+    if builtins.int(host_read(x.min())) < 0:
         raise ValueError("bincount: input must be non-negative")
     # The output length is data-dependent (max value + 1): realize just
     # that scalar — the counts themselves stay lazy tinygrad ops.
     length = builtins.max(
-        builtins.int(x.max().numpy()) + 1, builtins.int(minlength)
+        builtins.int(host_read(x.max())) + 1, builtins.int(minlength)
     )
     ids = Tensor.arange(length, dtype=to_tinygrad_dtype("int32"))
     onehot = x.cast(to_tinygrad_dtype("int32")).reshape(
@@ -1295,7 +1296,7 @@ def split(x, indices_or_sections, axis=0):
     # Split points are shape metadata, not a differentiable path: tensors /
     # numpy arrays of indices are read out as host ints (like repeat counts).
     if isinstance(indices_or_sections, Tensor):
-        indices_or_sections = indices_or_sections.numpy().tolist()
+        indices_or_sections = host_read(indices_or_sections).tolist()
     elif hasattr(indices_or_sections, "tolist"):
         indices_or_sections = indices_or_sections.tolist()
     if isinstance(indices_or_sections, int):
@@ -1323,7 +1324,7 @@ def repeat(x, repeats, axis=None):
         # Per-element repeat counts make the output shape data-dependent;
         # the counts are structural ints (no gradient path), so realizing
         # them here is acceptable — x itself stays lazy.
-        repeats = repeats.numpy().tolist()
+        repeats = host_read(repeats).tolist()
     elif hasattr(repeats, "tolist"):  # numpy array / scalar
         repeats = repeats.tolist()
     if isinstance(repeats, (builtins.list, tuple)):
@@ -1399,11 +1400,11 @@ def roll(x, shift, axis=None):
     x = convert_to_tensor(x)
     # Normalize numpy arrays / tensors of shifts and axes to python values.
     if isinstance(shift, Tensor):
-        shift = shift.numpy().tolist()
+        shift = host_read(shift).tolist()
     elif hasattr(shift, "tolist"):
         shift = shift.tolist()
     if isinstance(axis, Tensor):
-        axis = axis.numpy().tolist()
+        axis = host_read(axis).tolist()
     elif hasattr(axis, "tolist") and axis is not None:
         axis = axis.tolist()
     if isinstance(shift, (builtins.list, tuple)) or isinstance(
@@ -1472,7 +1473,7 @@ def pad(x, pad_width, mode="constant", constant_values=None):
         # read out, matching the numpy backend where np.pad materializes
         # widths as host integers.
         if isinstance(v, Tensor):
-            return builtins.int(v.item())
+            return builtins.int(host_read(v).item())
         return v
 
     pads = [tuple(_pad_amount(v) for v in p) for p in pad_width]
@@ -1537,7 +1538,7 @@ def full(shape, fill_value, dtype=None):
         if fill.ndim > 0:
             # Array-valued fill broadcasts against the target shape.
             return broadcast_to(fill, _shape_tuple(shape))
-        fill_value = fill.numpy().item()
+        fill_value = host_read(fill).item()
     elif isinstance(fill_value, np.generic):
         fill_value = fill_value.item()
     return Tensor.full(
@@ -1577,7 +1578,7 @@ def arange(start, stop=None, step=None, dtype=None):
         # numpy scalars here would be embedded as raw UOp srcs and crash
         # tinygrad's graph_rewrite.
         if isinstance(v, Tensor):
-            return v.item()
+            return host_read(v).item()
         if isinstance(v, np.generic):
             return v.item()
         return v
@@ -1753,7 +1754,7 @@ def _eye_dim(v):
                 "eye dimensions must be integers. Received: tensor of "
                 f"dtype {to_keras_dtype(v.dtype)}"
             )
-        return builtins.int(v.item())
+        return builtins.int(host_read(v).item())
     if isinstance(v, np.generic):
         v = v.item()
     return operator.index(v)
@@ -1860,7 +1861,7 @@ def nonzero(x):
     """Indices of nonzero elements, numpy-style tuple-per-dimension.
 
     The output shape is data-dependent, so the nonzero COUNT is realized
-    eagerly here (`.numpy()` on the mask sum) — acceptable for this op only,
+    eagerly here (`host_read` of the mask sum) — acceptable for this op only,
     the index computation itself stays in tinygrad ops. All-zero inputs
     return zero-length tensors.
     """
@@ -1870,7 +1871,7 @@ def nonzero(x):
     flat = x.reshape(-1)
     n = flat.shape[0]
     mask = flat != 0
-    count = builtins.int(mask.sum().numpy())  # data-dependent shape
+    count = builtins.int(host_read(mask.sum()))  # data-dependent shape
     # Stable extraction without argsort-stability assumptions: nonzero
     # positions keep their own flat index as sort key, zeros get sentinel
     # `n`, so ascending sort puts nonzero positions first, in order.
@@ -2589,7 +2590,7 @@ def _host_q(q):
     if isinstance(q, Tensor):
         if to_keras_dtype(q.dtype) == "bfloat16":
             q = q.cast(to_tinygrad_dtype("float32"))
-        qn = np.asarray(q.numpy(), dtype=np.float64)
+        qn = np.asarray(host_read(q), dtype=np.float64)
     else:
         qn = np.asarray(q, dtype=np.float64)
     shape = builtins.list(qn.shape)
@@ -2873,7 +2874,7 @@ def array_split(x, indices_or_sections, axis=0):
     x = convert_to_tensor(x)
     axis = _norm_axis(axis, x.ndim)
     if isinstance(indices_or_sections, Tensor):
-        indices_or_sections = indices_or_sections.numpy().tolist()
+        indices_or_sections = host_read(indices_or_sections).tolist()
     elif hasattr(indices_or_sections, "tolist"):
         indices_or_sections = indices_or_sections.tolist()
     if not isinstance(indices_or_sections, builtins.int):
@@ -2985,10 +2986,7 @@ def slogdet(x):
 def _host_scalar(x):
     """Read a structural scalar out of a Tensor / numpy value host-side."""
     if isinstance(x, Tensor):
-        if to_keras_dtype(x.dtype) == "bfloat16":
-            # tinygrad can't read bfloat16 buffers directly (no host fmt).
-            x = x.cast(to_tinygrad_dtype("float32"))
-        return x.item()
+        return host_read(x).item()  # (bfloat16 cast lives in host_read)
     if isinstance(x, (np.generic, np.ndarray)):
         return x.item()
     return x

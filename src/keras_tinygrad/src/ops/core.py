@@ -7,6 +7,7 @@ import warnings
 
 import numpy as np
 from tinygrad import Tensor
+from tinygrad.tensor import all_tensors as _all_tensors
 from tinygrad.uop.ops import Ops
 from tinygrad import dtypes as tg_dtypes
 from tinygrad.dtype import DType
@@ -38,7 +39,20 @@ class MissingOpError(NotImplementedError, AttributeError):
 SUPPORTS_SPARSE_TENSORS = False
 SUPPORTS_RAGGED_TENSORS = False
 SUPPORTS_COMPLEX_DTYPES = False
-IS_THREAD_SAFE = True
+# NOT thread-safe, like the tensorflow backend says of itself. With True
+# (copied from the numpy backend) keras' CallbackList dispatches every
+# batch-end hook to a ThreadPoolExecutor, and `pythonify_logs` there
+# realizes the metric result tensors — a kernel launch plus a copyout — on
+# a WORKER THREAD while the main thread launches the next batch and frees /
+# reuses buffers on the same device. tinygrad's runtimes share one kernel
+# object per program and set its arguments in place (`clSetKernelArg` is
+# not thread-safe per the OpenCL spec) and the LRU allocator has no lock:
+# on the CL device `model.evaluate` returned the previous batch's `count`
+# or a freed buffer's bytes about one run in three (2026-10-02,
+# scripts/probe_cl_evaluate.py; the CPU device never showed it, by luck —
+# its launch path is synchronous). False keeps every host read on the
+# thread that drives the device. Receipt: tests/test_device_cl.py.
+IS_THREAD_SAFE = False
 
 TINYGRAD_DTYPES = {
     "float16": tg_dtypes.float16,
@@ -84,6 +98,56 @@ def _dtype_str(self):
 
 
 DType.__str__ = _dtype_str
+
+
+# `tinygrad_tensor <op> keras.Variable` — the Variable on the RIGHT of a
+# python operator. A keras-core idiom (`dense_out + self.my_variable` in
+# keras.io's "customizing saving and serialization" guide; any user layer
+# that writes it that way round). Python calls tinygrad's dunder first;
+# tinygrad converts an unknown operand through `dtypes.from_py` and RAISES
+# (RuntimeError "Could not infer dtype of <Variable ...>"), so python never
+# reaches `Variable.__radd__`. Other backends' Variables plug into their
+# framework's array protocol (`__tf_tensor__`, `__jax_array__`,
+# `__torch_function__`); tinygrad has none. Additive and guarded: for a
+# KerasVariable operand ONLY, the Tensor dunder answers NotImplemented and
+# python falls through to the Variable's reflected op
+# (`backend.numpy.add(other, self.value)` — the graph is built on the
+# variable's own tensor, so gradients reach it). Every other operand type,
+# including junk, sees the untouched tinygrad method and its own error.
+# Receipts: tests/test_variable_interop.py.
+_VARIABLE_OPERAND_DUNDERS = (
+    "__add__", "__sub__", "__mul__", "__truediv__", "__floordiv__", "__mod__",
+    "__pow__", "__matmul__", "__and__", "__or__", "__xor__",
+    "__lshift__", "__rshift__", "__lt__", "__le__", "__gt__", "__ge__",
+    "__eq__", "__ne__",
+)
+
+
+def _defer_to_variable(tg_dunder):
+    def dunder(self, other):
+        if isinstance(other, KerasVariable):
+            return NotImplemented
+        return tg_dunder(self, other)
+
+    dunder.__name__ = tg_dunder.__name__
+    dunder.__doc__ = tg_dunder.__doc__
+    dunder.__wrapped__ = tg_dunder
+    # own marker: tinygrad's dunders already carry a `__wrapped__` (its
+    # tracing decorator), so that attribute cannot serve as the once-guard.
+    dunder._keras_variable_guard = True
+    return dunder
+
+
+for _name in _VARIABLE_OPERAND_DUNDERS:
+    _tg = getattr(Tensor, _name, None)
+    if _tg is not None and not getattr(_tg, "_keras_variable_guard", False):
+        setattr(Tensor, _name, _defer_to_variable(_tg))
+
+# `abs(tensor)`: keras' `Variable.__abs__` is `self.value.__abs__()`, and
+# tinygrad's Tensor has `abs()` but no `__abs__` (keras' own
+# variables_test `test__abs__`). Additive: the name did not exist.
+if not hasattr(Tensor, "__abs__"):
+    Tensor.__abs__ = Tensor.abs
 
 
 def to_tinygrad_dtype(dtype):
@@ -475,9 +539,36 @@ def cast(x, dtype):
     return convert_to_tensor(x, dtype=dtype)
 
 
+def host_read(x):
+    """Read a Tensor's value onto the host (a numpy array) WITHOUT cutting the
+    autograd graph of anything that shares nodes with it.
+
+    tinygrad (0.13 and 0.14, probed 2026-09-28) realizes a read by swapping,
+    on EVERY live tensor, each node the read materialized (`.contiguous()`
+    nodes and whatever else the scheduler turns into a buffer) for that
+    buffer; `Tensor.gradient` then returns silent ZEROS upstream of it.
+    Detaching the read tensor changes nothing (the nodes are the same
+    objects). So every op that reads a data-dependent value host-side (a
+    predicate, a count, a shape argument that arrived as a tensor) goes
+    through here: the read happens, then every other tensor's graph is put
+    back — the value is what it was, the materialized intermediates are
+    dropped (recomputed once, later, with the graph), and the gradient path
+    is intact. Receipts: tests/test_host_reads.py. Under the train-step JIT
+    a host read still raises at capture (loud fallback to eager, where this
+    applies)."""
+    if x.dtype == tg_dtypes.bfloat16:  # tinygrad has no host format for it
+        x = x.cast(tg_dtypes.float32)
+    live = [(t, t.uop) for ref in list(_all_tensors) if (t := ref()) is not None]
+    out = x.numpy()
+    for t, uop in live:
+        if t.uop is not uop:
+            t.uop = uop
+    return out
+
+
 def cond(pred, true_fn, false_fn):
     if isinstance(pred, Tensor):
-        pred = pred.numpy().item()
+        pred = host_read(pred).item()
     if pred:
         return true_fn()
     return false_fn()
@@ -736,7 +827,7 @@ def associative_scan(f, elems, reverse=False, axis=0):
 def _index_int(i):
     """Static python int from an index that may be a Tensor or numpy scalar."""
     if isinstance(i, Tensor):
-        return int(i.item())
+        return int(host_read(i).item())
     return int(i)
 
 
@@ -879,7 +970,7 @@ def while_loop(cond, body, loop_vars, maximum_iterations=None):
     def eval_cond(*args):
         result = cond(*args)
         if isinstance(result, Tensor):
-            result = result.numpy().item()
+            result = host_read(result).item()
         return result
 
     while eval_cond(*loop_vars) and iteration_check(current_iter):
