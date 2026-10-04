@@ -67,13 +67,31 @@ def _device_rng_covers(layer):
         from keras.src.layers.regularization.gaussian_noise import (
             GaussianNoise,
         )
+        from keras.src.layers.rnn.gru import GRUCell
+        from keras.src.layers.rnn.lstm import LSTMCell
+        from keras.src.layers.rnn.simple_rnn import SimpleRNNCell
     except ImportError:
         # keras moved these private modules (this runs mid-fit on whatever
         # keras version the user has): fail SAFE — eager, never a frozen
         # capture, never an ImportError out of the second batch.
         return False
 
-    return type(layer) in (Dropout, GaussianNoise, GaussianDropout, AlphaDropout)
+    # The recurrent cells own a SeedGenerator unconditionally (keras'
+    # `DropoutRNNCell` mix-in) but draw ONLY through `random.dropout` — the
+    # input and recurrent masks — and only when a rate is > 0. Same
+    # A/B receipt as the regularization family, LSTM with both rates > 0,
+    # JIT vs eager bit-for-bit: tests/test_rnn_perf.py. Before this an
+    # LSTM/GRU/SimpleRNN model never jitted, silently (the gate does not
+    # warn), so the 35 s/step eager scan was the whole story.
+    return type(layer) in (
+        Dropout,
+        GaussianNoise,
+        GaussianDropout,
+        AlphaDropout,
+        LSTMCell,
+        GRUCell,
+        SimpleRNNCell,
+    )
 
 
 class _TrainStepJit:
@@ -375,22 +393,37 @@ class TinygradTrainer(base_trainer.Trainer):
         # recorded custom-gradient blocks this step, which a jit replay
         # would freeze — that forces the eager path.
         self._tape_was_nonempty = bool(tape_blocks)
+
+        # ORDER: the gradient graph is built BEFORE anything realizes the
+        # loss. The loss tracker's `update_state` below assigns (= realizes)
+        # `total + loss`, and a realize swaps every `.contiguous()` node it
+        # materializes for its buffer in every live tensor — `loss.gradient`
+        # taken afterwards returns silent ZEROS upstream of those nodes
+        # (architecture invariant 12). With the tracker first, any forward
+        # holding such a node (log1p, the RNN scan's per-step cuts, linalg
+        # loops) trained only the layers downstream of it: LSTM + Embedding
+        # weights did not move at all while the Dense head did, found
+        # 2026-09-28. A graph built first is immune — realizes only swap
+        # Tensor objects, the built gradient graph keeps its uops (the
+        # linalg `_cut` pattern). Receipt: tests/test_rnn_perf.py.
+        gradients = None
+        if self.trainable_weights:
+            trainable_weights = self.trainable_weights[:]
+            scaled = loss
+            if self.optimizer is not None:
+                scaled = self.optimizer.scale_loss(loss)
+            gradients = compute_gradients(
+                scaled,
+                [variable.value for variable in trainable_weights],
+                tape_blocks,
+            )
         self._loss_tracker.update_state(
             loss,
             sample_weight=next(
                 i for i in tree.flatten(x) if i is not None
             ).shape[0],
         )
-        if self.optimizer is not None:
-            loss = self.optimizer.scale_loss(loss)
-
-        if self.trainable_weights:
-            trainable_weights = self.trainable_weights[:]
-            gradients = compute_gradients(
-                loss,
-                [variable.value for variable in trainable_weights],
-                tape_blocks,
-            )
+        if gradients is not None:
             self.optimizer.apply(gradients, trainable_weights)
         else:
             warnings.warn("The model does not have any trainable weights.")
@@ -820,6 +853,12 @@ class TinygradTrainer(base_trainer.Trainer):
         data = (x, y, sample_weight)
         self._symbolic_build(data)
         self.make_train_function()
+        # Like the tensorflow / jax / torch trainers (the numpy one, which
+        # this file was ported from, forgets it): the returned logs are THIS
+        # batch's, not a running mean over every *_on_batch call so far.
+        # Found 2026-09-28 comparing train_on_batch curves with tensorflow:
+        # ours at step k was exactly the mean of tf's steps 1..k.
+        self.reset_metrics()
 
         logs = self.train_function([data])
         logs = pythonify_logs(logs)
@@ -839,6 +878,7 @@ class TinygradTrainer(base_trainer.Trainer):
         data = (x, y, sample_weight)
         self._symbolic_build(data)
         self.make_test_function()
+        self.reset_metrics()  # same rule as train_on_batch
 
         logs = self.test_function([data])
         logs = pythonify_logs(logs)

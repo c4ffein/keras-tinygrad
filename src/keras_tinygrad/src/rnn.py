@@ -5,6 +5,18 @@ implementation, executed with tinygrad tensors end-to-end so gradients flow
 through the unrolled time loop. The fused lstm/gru kernels are only the
 cudnn fast path; `cudnn_ok` answers False so recurrent layers always take
 the generic path, and the fused stubs stay loud.
+
+Every timestep's carried state and output pass through `_cut`
+(`contiguous().contiguous_backward()`, the linalg loop pattern —
+architecture invariant 12): a kernel barrier in both directions that keeps
+the autograd graph. Without it the whole recurrence is ONE lazy graph and
+tinygrad's scheduler/rewriter is superlinear in it: LSTM(32) over 10 steps,
+batch 32, CPU, 2026-09-28 — 451 kernels and 36 s per eager train step, 77 s
+at 25 steps; with the cuts 59 kernels and 0.6 s, linear in T. Gradients are
+unchanged (checked against the tensorflow backend on identical weights).
+The barrier is the very thing that makes gradient ORDER matter in the
+trainer: the gradient graph must be built before anything realizes the
+loss (see `TinygradTrainer.train_step`).
 """
 
 from tinygrad import Tensor
@@ -12,6 +24,13 @@ from tinygrad import dtypes as tg_dtypes
 
 from keras.src import tree
 from keras_tinygrad.src.ops.core import convert_to_tensor
+
+
+def _cut(x):
+    """Kernel barrier for a loop-carried value, gradient-preserving."""
+    if isinstance(x, Tensor):
+        return x.contiguous().contiguous_backward()
+    return x
 
 
 def rnn(
@@ -127,6 +146,8 @@ def rnn(
                     )
                 )
                 states = tree.pack_sequence_as(states, flat_final_states)
+                states = tree.map_structure(_cut, states)
+                output = _cut(output)
 
                 if return_all_outputs:
                     successive_outputs.append(output)
@@ -144,6 +165,8 @@ def rnn(
                 output, states = step_function(
                     inp, tuple(states) + tuple(constants)
                 )
+                states = tree.map_structure(_cut, states)
+                output = _cut(output)
                 if return_all_outputs:
                     successive_outputs.append(output)
                     successive_states.append(states)
@@ -253,12 +276,14 @@ def tinygrad_scan(f, init, xs, reverse=False, mask=None):
 
         for each_x, each_mask in zip(unstack(x), unstack(mask)):
             states, output = f(states, (each_x, each_mask))
+            states, output = tree.map_structure(_cut, states), _cut(output)
             outputs.append(output)
     else:
         xs = xs.flip(0) if reverse else xs
 
         for x in unstack(xs):
             states, output = f(states, x)
+            states, output = tree.map_structure(_cut, states), _cut(output)
             outputs.append(output)
 
     outputs = Tensor.stack(*outputs)
