@@ -1,6 +1,7 @@
 # keras-tinygrad — project instructions
 
-- START by reading HANDOFF.md (state, how to run, decision queue), then
+- START by reading HANDOFF.md (state, how to run, open items; the dated
+  record behind it is docs/history/handoff-log.md), then
   docs/architecture.md (the 12 invariants — binding, update in the same diff
   that moves a boundary).
 - The backend SOURCE OF TRUTH is src/keras_tinygrad/src/ (the pluggable-

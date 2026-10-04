@@ -32,7 +32,7 @@ Verified 2026-08-10:
   routes through `standardize_dtype`. Zero patches applied.
 - Referee subset on the fork path: `dense_test.py` **70 passed / 1 failed
   / 1 skipped** — identical to the stock-path tally (the 1 fail is the
-  known upstream float8 test-side issue, see docs/upstream/keras-pr/).
+  known upstream float8 test-side issue, see docs/history/upstream/keras-pr/).
 - Stock path unchanged: `make verify` (9 loader tests), `make tutorial`,
   `make smoke` all green with the hook installing exactly as before.
 
@@ -134,5 +134,5 @@ cd /home/dev/workspace/keras-tinygrad && make verify tutorial smoke
   PoC's guess).
 - The `DynamicBackend` silent-None → ValueError change is a behavior fix
   bundled with the mechanism; maintainers may want it split.
-- Sequencing per docs/upstream-keras-draft.md: test-side PR first, then
+- Sequencing per docs/history/upstream/keras-draft.md: test-side PR first, then
   the design issue with this branch + the published package as exhibits.

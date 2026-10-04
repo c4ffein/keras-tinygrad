@@ -1,0 +1,98 @@
+{
+    "gpu-probe": {
+        "id": "gpu-probe",
+        "gpu": true,
+        "adapter": false
+    },
+    "tfjs-webgl": {
+        "id": "tfjs-webgl",
+        "phases": {
+            "backendInitMs": 29.635000228881836,
+            "modelBuildMs": 20.479999542236328
+        },
+        "actualBackend": "webgl",
+        "firstStepMs": 3662.210000038147,
+        "steadyMedianMs": 38.03499984741211,
+        "steadyP10Ms": 31.649999618530273,
+        "steadyP90Ms": 46.32499980926514,
+        "steadyMeanMs": 38.72285004615784,
+        "stepsPerSec": 25.824545424936307,
+        "lossFirst": 2.4488468170166016,
+        "lossLast": 0.006346479058265686,
+        "descended": true
+    },
+    "tfjs-cpu": {
+        "id": "tfjs-cpu",
+        "phases": {
+            "backendInitMs": 2.989999771118164,
+            "modelBuildMs": 19.729999542236328
+        },
+        "actualBackend": "cpu",
+        "firstStepMs": 505.0200004577637,
+        "steadyMedianMs": 105.14999961853027,
+        "steadyP10Ms": 102.23999977111816,
+        "steadyP90Ms": 114.84500026702881,
+        "steadyMeanMs": 106.88852500915527,
+        "stepsPerSec": 9.355541204393525,
+        "lossFirst": 2.500377655029297,
+        "lossLast": 0.006389036774635315,
+        "descended": true
+    },
+    "tinygrad-webgpu": {
+        "id": "tinygrad-webgpu",
+        "phases": {
+            "gpuDeviceMs": 39.28499984741211,
+            "pyodideBootMs": 5448.0300006866455,
+            "pyodidePackagesMs": 2286.125,
+            "traceMs": 19655.215000152588,
+            "pipelinesMs": 2111.430000305176
+        },
+        "kernels": 20,
+        "firstStepMs": 101.625,
+        "steadyMedianMs": 54.954999923706055,
+        "steadyP10Ms": 48.769999504089355,
+        "steadyP90Ms": 69.42000007629395,
+        "steadyMeanMs": 57.24289999961853,
+        "stepsPerSec": 17.469415421068184,
+        "lossFirst": 2.6594693660736084,
+        "lossLast": 0.00659665884450078,
+        "descended": true
+    },
+    "tfjs-webgl2": {
+        "id": "tfjs-webgl2",
+        "phases": {
+            "backendInitMs": 18.780000686645508,
+            "modelBuildMs": 22.86500072479248
+        },
+        "actualBackend": "webgl",
+        "firstStepMs": 3798.779999732971,
+        "steadyMedianMs": 38.39999961853027,
+        "steadyP10Ms": 32.21000003814697,
+        "steadyP90Ms": 47.22500038146973,
+        "steadyMeanMs": 39.48277498245239,
+        "stepsPerSec": 25.327500421245393,
+        "lossFirst": 2.675553560256958,
+        "lossLast": 0.006662964820861816,
+        "descended": true
+    },
+    "tinygrad-webgpu2": {
+        "id": "tinygrad-webgpu2",
+        "phases": {
+            "gpuDeviceMs": 44.769999504089355,
+            "pyodideBootMs": 5424.619999885559,
+            "pyodidePackagesMs": 2266.119999885559,
+            "traceMs": 19834.04499912262,
+            "pipelinesMs": 2299.8549995422363
+        },
+        "kernels": 20,
+        "firstStepMs": 62.78499984741211,
+        "steadyMedianMs": 56.054999351501465,
+        "steadyP10Ms": 47.609999656677246,
+        "steadyP90Ms": 69.32499980926514,
+        "steadyMeanMs": 57.07892501831055,
+        "stepsPerSec": 17.519601143140072,
+        "lossFirst": 2.6594693660736084,
+        "lossLast": 0.00659665884450078,
+        "descended": true
+    }
+}

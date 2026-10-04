@@ -24,7 +24,8 @@ flowchart TD
     D --> E["tinygrad Tensor graph — LAZY<br/>pure Tensor ops, no numpy<br/>in any differentiable path"]
     E --> F{realize points}
     F --> G["Variable assign:<br/>detach().realize()"]
-    F --> H["convert_to_numpy / .item():<br/>terminal reads, per predict batch"]
+    F --> H["convert_to_numpy:<br/>terminal reads, per predict batch"]
+    F --> J["core.host_read (eager only):<br/>read + restore every other<br/>tensor's graph, gradient-safe"]
     F --> I["linalg host checks (eager only):<br/>read a SIDE graph of the detached input"]
     T["trainer: forward under<br/>custom-gradient tape"] --> E
     E --> L["loss.gradient(*weights)<br/>(+ VJP composition around<br/>recorded custom blocks)"]
@@ -65,8 +66,13 @@ numpy round-trips) and to make every exit from it explicit.
   flow w.r.t. the image; numpy only for static coordinate/weight tables;
   coordinate-side inputs get no gradients (numpy-reference behavior).
 - **rnn** — the generic `rnn()` scan, a straight port of the numpy backend's,
-  run on Tensors end-to-end so gradients flow through the time loop;
-  `cudnn_ok` answers False and the fused lstm/gru stubs raise.
+  run on Tensors end-to-end so gradients flow through the time loop; every
+  timestep's carried state and output pass through `_cut`
+  (`contiguous().contiguous_backward()`, the linalg loop pattern) so the
+  lazy graph the scheduler walks is one timestep deep, not T (uncut, an
+  LSTM(32) over 10 steps cost 35 s per eager train step, 90% of it in
+  tinygrad's rewriter). `cudnn_ok` answers False and the fused lstm/gru
+  stubs raise.
 - **random** — numpy `Generator` sampling seeded through Keras'
   `SeedGenerator`, samples wrapped as Tensors. This is a feature, not a
   shortcut: seeding semantics and drawn bits are identical to the reference
@@ -124,7 +130,7 @@ The six touchpoints have a second consumer besides the loader: keras'
 `keras_tinygrad.src` and reads `trainer.Trainer` / `layer.BackendLayer` /
 `export.SavedModelExportArchive` (the last two optional; all aliased in
 the backend sources next to the `Tinygrad*` names), and the older
-plugin-backends PoC (docs/upstream/keras-plugin-poc.md) an entry-point
+plugin-backends PoC (docs/history/upstream/keras-plugin-poc-2026-08-10.md) an entry-point
 protocol (`keras.backends` group, `layer.Layer` / `export.ExportArchive`
 / `standardize_dtype_hook`). The loader's six patches import that same
 `keras_tinygrad.src` package, so stock keras and the branch share one
@@ -192,9 +198,13 @@ tape opener; symbolic build / predict / evaluate see passthrough behavior.
    variable_in_step_with_eager`). Long tensor loops bound their lazy graphs
    explicitly. A lazy graph must never outlive the buffers it reads.
 6. **Monkeypatches are a closed, minimal set** — `Tensor.__bool__`,
-   `__array__`, `__float__`, `__int__`, `__index__` and `DType.__str__`
-   (`__repr__` stays tinygrad's). All are scalar-interop shims that add
-   missing behavior, with one named exception: `Tensor.__bool__`
+   `__array__`, `__float__`, `__int__`, `__index__`, `__abs__`,
+   `DType.__str__` (`__repr__` stays tinygrad's), and the binary dunders
+   (`__add__` … `__ne__`, `__matmul__`) which answer `NotImplemented` for
+   a `KerasVariable` operand only, so `tensor + variable` reaches the
+   Variable's reflected op instead of tinygrad's "Could not infer dtype".
+   All are interop shims that add missing behavior, with one named
+   exception: `Tensor.__bool__`
    deliberately REPLACES tinygrad's always-raising implementation
    (single-element truthiness, numpy semantics). Nothing else may override
    an existing tinygrad attribute, and op implementations never depend on
@@ -222,11 +232,32 @@ tape opener; symbolic build / predict / evaluate see passthrough behavior.
     their kernels with `contiguous().contiguous_backward()`; a host-side
     validity check reads a side graph rebuilt from the detached input and
     is skipped under the trainer's tape (`core.in_custom_gradient_tape`).
-    Where a lazy graph is not affordable the op says so: a Jacobi
-    iteration past `linalg._JACOBI_LAZY_ROUNDS` realizes per round, carries
-    no gradient, and RAISES inside a train step.
+    Host reads of data-dependent values (predicates in `cond`/`while_loop`,
+    counts in `nonzero`/`bincount`, tensor-valued shape arguments in
+    `split`/`repeat`/`roll`/`pad`/`full`/`arange`/`eye`/`quantile`, the
+    `__bool__`/`__float__`/`__int__`/`__array__` dunders, `_index_int`) go
+    through `core.host_read`: the read realizes, then every other live
+    tensor's graph is restored, so the value is what it was and no
+    `.contiguous()` node shared with the loss stays materialized.
+    Detaching the read does not achieve this (same UOp objects).
+    `convert_to_numpy` remains the one terminal read (predict / evaluate /
+    metrics, after the gradient). Where a lazy graph is not affordable the
+    op says so: a Jacobi iteration past `linalg._JACOBI_LAZY_ROUNDS`
+    realizes per round, carries no gradient, and RAISES inside a train
+    step. **The trainer builds the gradient graph BEFORE any realize of
+    the step** (`compute_gradients` first, then the loss tracker's
+    `update_state`, then `optimizer.apply`): a realize swaps every
+    `.contiguous()` node it materializes for its buffer, so a tracker
+    update that ran first zeroed the gradient upstream of any forward
+    barrier — every rnn `_cut`, `log1p`'s compensated form, a linalg loop
+    (found 2026-09-28: Embedding+LSTM weights did not move while the
+    Dense head trained). A built graph is immune. Receipt:
+    `test_train_step_gradients_survive_forward_barriers`.
     Receipts: `tests/test_backend_regressions.py`
-    (`test_linalg_gradients_are_not_silently_zero`).
+    (`test_linalg_gradients_are_not_silently_zero`) and
+    `tests/test_host_reads.py`, whose `mechanism` entry asserts that a raw
+    `.item()` still zeroes gradients on the pinned tinygrad — the day it
+    stops, `host_read` can be retired.
 
 ## Known leaks and quirks (accepted, not aspirational)
 
@@ -239,12 +270,18 @@ tape opener; symbolic build / predict / evaluate see passthrough behavior.
   capture and the trainer falls back to eager with a warning. Static
   eager gates: custom `train_step`, seed-generator layers not on
   `_device_rng_covers`'s exact-type list (covered layers keep the JIT
-  because their draws are on-device),
+  because their draws are on-device — Dropout subclasses and, since
+  2026-09-28, the LSTM/GRU/SimpleRNN cells, whose `DropoutRNNCell`
+  mix-in owns a SeedGenerator unconditionally and had silently gated
+  every recurrent model to eager, warning-free),
   LossScaleOptimizer, gradient accumulation, EMA, non-empty
   custom-gradient tape (quantized training), `run_eagerly`. Escape hatch
   `KERAS_TINYGRAD_TRAINER_JIT=0`. Eager-vs-jit verified bit-for-bit over
   12 scenarios; ~5–15x steady-state steps/sec. test/predict remain
-  eager per-step compilation.
+  eager per-step compilation. `train_on_batch` / `test_on_batch` reset
+  the metrics first, like the tensorflow/jax/torch trainers (the numpy
+  trainer this one was ported from does not, and ours reported a
+  running mean until 2026-09-28).
 - Fused `lstm` / `gru` / bidirectional kernels are loud stubs; `cudnn_ok`
   answers False so recurrent layers always take the generic scan (correct,
   differentiable, slow).
@@ -252,8 +289,11 @@ tape opener; symbolic build / predict / evaluate see passthrough behavior.
   and cast on-device; `convert_to_numpy` re-quantizes through `ml_dtypes` to
   match other backends' array dtype.
 - **A host read in the middle of a forward pass zeroes gradients upstream
-  of it** (the mechanism of invariant 12), and the backend cannot prevent
-  that in code it does not own: a custom layer calling `.item()` /
+  of it** (the mechanism of invariant 12). The backend's own reads are
+  covered since 2026-09-28 (`core.host_read`, 22 sites that gave WRONG
+  gradients before — not zero: the factors that did not pass through the
+  materialized node survived); what remains is code the backend does not
+  own: a custom layer calling `.item()` /
   `convert_to_numpy` on an intermediate, or an eager linalg host check
   (cholesky's non-PD raise, `eig`'s symmetry gate, the Jacobi convergence
   warning) whose INPUT comes out of a caller graph holding `.contiguous()`
@@ -294,6 +334,14 @@ tape opener; symbolic build / predict / evaluate see passthrough behavior.
   the train-step JIT off — the slowest configuration on both axes at once.
 - The zig-cc shim (README/CONTRIBUTING) is a box workaround for clang-less
   machines, not a product feature of the backend.
+- **The backend is declared NOT thread-safe** (`IS_THREAD_SAFE = False`,
+  next to the `SUPPORTS_*` flags). Keras then runs callback hooks inline
+  instead of on a thread pool, so every host read happens on the thread
+  that launches kernels. tinygrad sets kernel arguments in place on one
+  kernel object per program and its allocator has no lock; a read from a
+  second thread on an asynchronous device (CL, 2026-10-02) returned a
+  stale buffer about one evaluate in three. The numpy backend says True
+  and was the port source; tensorflow says False.
 - Sparse and ragged tensors and string preprocessing layers are deliberately
   out of scope (`SUPPORTS_*` flags say so up front). Complex dtypes are
   **complex-lite interop only**: `view_as_complex`/`view_as_real` work via

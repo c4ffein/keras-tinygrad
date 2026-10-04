@@ -1,448 +1,202 @@
-# HANDOFF — state of the keras-tinygrad bridge (2026-09-21)
+# HANDOFF — current state of keras-tinygrad (2026-09-28)
 
-Written by the session that built all of this in one day, for whoever picks it
-up next (human or agent). Everything below was true at write time; verify with
-the commands given rather than trusting numbers blindly.
+The short version for whoever picks this up next, human or agent. Numbers
+are the tallies of record; re-verify with the commands given rather than
+trusting them. The full dated log of how every piece came to be — every
+review pass, every bug and its receipt — is `docs/history/handoff-log.md`.
 
 ## What this is
 
-The first Keras 3 backend for tinygrad. Two forms:
+A tinygrad backend for stock Keras 3, shipped as a pip package. The backend
+sources are `src/keras_tinygrad/src/` (pluggable-backend layout:
+`ops/{core,image,linalg,math,nn,numpy}` + `random`, `rnn`, `trainer`,
+`layer`, `export`). A meta-path import hook grafts them onto the PyPI keras
+wheel with six match-exactly-once source patches (`docs/how-it-works.md`);
+on keras' pluggable-backend branch the hook stands down and the package
+loads as a plain plugin. Keras' own test suite is the referee.
 
-1. **In-tree** (historical): `/home/dev/workspace/keras` — a keras-team/keras
-   clone (master 2026-07-25) with `keras/src/backend/tinygrad/` plus 6 small
-   keras-core edits. It was the source of truth until 2026-08-30; it is now
-   a leftover. Nothing in this repo reads it.
-2. **Packaged** (the only form): this repo — pip package running the
-   backend against STOCK pypi keras via a meta-path import hook (6
-   match-exactly-once source patches; see `docs/how-it-works.md`). The
-   backend sources under `src/keras_tinygrad/src/` ARE the source of
-   truth. The referee (`make referee` → `scripts/referee.sh`) clones the
-   pinned keras tag into `.referee/` and runs Keras' own tests from inside
-   that tree with the hook active — no hand-edited checkout anywhere.
+Two more halves: `keras_tinygrad.webgpu` exports a Keras train step as a
+self-contained WebGPU bundle, and `js/` is the npm package that runs such
+bundles in a browser (`keras-tinygrad`) and traces models in-tab under
+Pyodide (`keras-tinygrad/trace`). `js/demo/` is the proof rig for both.
 
-## Verified state (2026-08-30, RNG/export items re-verified 2026-09-01)
+## Pins and versions
 
-- Keras' own FULL layers tree, preprocessing included — since 2026-08-30
-  on the keras **v3.15.1 tag tree** via `make referee` (`scripts/referee.sh`,
-  py3.12 + tensorflow for collection, failed set compared to
-  `scripts/referee-baseline.txt`): **1,988 passed / 5 failed / 215 skipped /
-  1 xpassed (99.7%)**. (Earlier tallies on a July keras master snapshot:
-  1,989 passed, same 5 failures — the tree has one test fewer.) The 5 =
-  2× upstream float8 (PR package drafted), 2× RandomCrop (tinygrad slice
-  bounds, upstream item), 1× AutoContrast (FMA 1.9e-06 vs atol 1e-06).
-  The grain/sqlite flake did not reproduce (warm kernel cache). The old
-  2,127/4/201 headline was the py3.14 ktg-venv profile WITHOUT
-  preprocessing collected — different skip/collection profile, superseded.
-- Support matrix (in README between the SUPPORT_MATRIX tokens — the README
-  table is the authoritative row list and totals; don't trust counts
-  repeated here): the 2026-08-03 dip from 99.8% is the DENOMINATOR growing:
-  ops/image and the
-  preprocessing tree entered the matrix 2026-08-03 (TF venv unlocked their
-  collection) and bring their honest tails with them. ops/math is 208/0/4
-  (100%) as of 2026-08-03 — cdist, logdet and
-  the segment_max/min/prod family landed (masked broadcast-reduce with
-  identity fill, differentiable w.r.t. data), and view_as_complex/
-  view_as_real went green via complex-lite interop: core's `ComplexTensor`
-  wrapper (real/imag Tensor pair, dtype the string "complex64", closed op
-  set, loud NotImplementedError on all complex arithmetic). Tier boundary
-  + extension rule: docs/complex-support.md.
-- Parity fuzz vs numpy reference: `make fuzz` 100/100 (op+layer),
-  `make fuzz-grad` 60/60 (finite-difference gradients), legacy
-  `--cases 80 --kinds op` 80/80 — after the float64-promotion decision and
-  its both-demoted addendum (both docs/float64-promotion.md; the superseded
-  39/40 run's one flag was that policy).
-- Package smoke vs stock keras 3.15: green (`examples/mlp_smoke.py`).
-- Loader test suite (`tests/test_loader.py`, 9 tests, in CI): green. Covers
-  keras-first RuntimeError, idempotent double-import, explicit-backend
-  respect, anchor-mismatch loudness, anchor drift vs installed keras.
-- Loader anchors verified against BOTH keras 3.15.0 (installed) and the
-  3.15.1 wheel (downloaded, file-level check); README/pyproject/docs now
-  all state 3.15.x — the old "3.15 / 3.16" claim was wrong, 3.16 does not
-  exist on PyPI as of 2026-08-03.
-- `sync_vendor.py` (history): its `--check` mode against the sibling clone
-  is gone with the clone. What remains is the one real guard — every
-  loader anchor occurs exactly once in the INSTALLED stock keras
-  (`make vendor-check`; `--self-check` is the same thing, kept for the
-  workflows' command lines).
+| what | value |
+|---|---|
+| keras | `>=3.15,<3.16` — 3.15.1 is the version of record |
+| tinygrad | `>=0.14,<0.15` (moved from 0.13 on 2026-09-21) |
+| python | `>=3.11` |
+| package version | 0.2.0 in pyproject, **untagged** — PyPI holds 0.1.0 only |
+| npm package | 0.0.1, **never published** |
 
-## 2026-09-01 review pass (Fable 5.1 over the whole uncommitted diff)
+## Tallies of record (tinygrad 0.14.0, keras v3.15.1 tag, 2026-09-21)
 
-Owner approved every item; all landed in this diff, all uncommitted.
-Receipts: `make verify` (22 tests, ~45 s — five new subprocess
-receipts in `tests/test_backend_regressions.py`), `make browser-assets`
-(green, wheel name derived as 0.1.1), and the full referee:
-**5 failed / 1,988 passed / 215 skipped / 1 xpassed** (0:26:54, v3.15.1
-tree, 2026-09-01) — the FAILED set is exactly the five baseline entries,
-zero regressions from the RNG changes. Run twice: the first run (sharing
-the box with `make verify` + `make browser-assets`) ended with pytest's
-own exit status 127 after a complete summary, so the script stopped
-before its comparison; the clean rerun (0:26:23, same tally) exited 0
-through the script's own check: "OK — failed set == baseline (5 known)".
-
-- **Device RNG revision 2** (`docs/device-rng.md`): the stream re-seeds at
-  every train-function build (`random.reset_device_stream`, called from
-  `make_train_function`; `keras_tinygrad.reset_device_rng()` for loops
-  that never rebuild one) and the seeding draw ADVANCES the generator, so
-  `set_random_seed; build; fit` twice in one process agree while a
-  continued fit moves on (numpy-backend shape). Before: once-per-process
-  seeding — a notebook re-running a cell got new masks. None seeds inside
-  the scope take the device path (a seedless custom layer now JITs with
-  fresh masks instead of the loud eager fallback). Device path coerces
-  numpy-int dims (tinygrad's exact-class argfix).
-- **Export hardening** (`keras_tinygrad.webgpu`): initial values come from
-  each weight's declared initializer (`_initializer_map` resolves the
-  owning layer's `<name>_initializer`; `_host_initial_values` ports Zeros/
-  Ones/Constant/GlorotUniform/RandomUniform/RandomNormal, anything else is
-  a NotImplementedError) — the "Glorot for kernels, zeros elsewhere" rule
-  had exported BatchNormalization's gamma and moving_variance as 0.0, a
-  dead network, silently. The loss must be built with `reduction=None`
-  (checked before tracing: Keras' default divides by a host-tuple tensor
-  that exported as an unwritten buffer). Labels derive from the loss
-  (`Sparse*` → int32 ids, else float32 like the output; `label_shape`/
-  `label_dtype` override). Placeholder batches are `Tensor.empty`, not
-  `randn` (which advanced the captured RNG counter).
-- **One exporter**: m0's `export_model.py` copy deleted, `m0.py` imports
-  `keras_tinygrad._vendor`; the byte-equality test is gone with it.
-  `experiments/pyodide-tinygrad/` keeps a frozen copy on purpose (runs
-  without this package inside Pyodide).
-- **Version 0.1.1** (pyproject + `__version__`): the wheel now ships
-  `webgpu.py` + `_vendor/`. The hub (`gen_hub.py`) and the Pyodide page
-  (`main.js` reads `wheels/latest.txt`) derive the wheel name; `make
-  browser-assets` builds it. Tag `v0.1.1` publishes.
-- **CI**: keras-watch prunes the orphan `ci-state` checkout (its first
-  commit would have carried main's whole tree), rebase-retries the push,
-  reads the tinygrad pin from pyproject; its PR step needs the repo
-  setting "Allow GitHub Actions to create and approve pull requests"
-  (`gh api` one-liner in the workflow header — owner's to flip).
-  referee.sh judges `PYTEST_ARGS` runs as subsets (a `-k` run reported
-  unexecuted baseline entries as NOW PASSING) and strips trailing slashes;
-  referee.yml passes the dispatch input through env. bump script: usage
-  error instead of IndexError; its last test compared a call to itself.
-- **Docs**: README (3.15.1 is the version of record; browser limits),
-  HANDOFF dates + the dead `sync_vendor --check` paragraph, architecture
-  invariant 9 + RNG-state row, device-rng.md revision 2, experiments/
-  README's "2-4× faster" line (steady-state single-box numbers, no run of
-  record — the bench harness already splits setup / first step / steady
-  state, what is missing is a real-GPU run), `run-bench.sh` tf.min.js
-  source (was an nnvp path).
-
-## 2026-09-21 — cloud patch series reviewed + integrated, linalg gradients fixed
-
-All uncommitted in the working tree (the owner commits). Source: the
-5-patch series `c4ffein-work/playground`, branch
-`claude/keras-tinygrad-openvino-check-ay9203`,
-`patches/c4ffein__keras-tinygrad/2026-09-21-keras-master-branch-compat/`
-(its REPORT.md is the why; remainder 9 below is the summary). Applied whole,
-then reviewed locally. What the review changed:
-
-- **`elastic_transform` was broken by the series**: patch 1 dropped
-  `image.py`'s `draw_seed` import while reordering the block → NameError on
-  first call. Invisible to `make verify` (backend sources are excluded from
-  ruff, no local test called the op). Restored; `make lint-check` now also
-  runs `ruff --isolated --select F821` over `src/keras_tinygrad/src`
-  (undefined names only — formatting still never touches those files);
-  receipt `test_elastic_transform_runs`.
-- **`gammainc` gradients were NaN at the domain edges** (x = 0, x = inf),
-  and through a broadcast `a` the NaN reached every element: the edges were
-  patched in with `where` AFTER the expansions had seen them, and the
-  broadcast was `a + x * 0.0` (inf * 0). Now: static-shape `expand`, edge
-  elements run the expansions on an interior point (gradient exactly 0
-  there), and `gammainc(0, 0)` is nan like scipy. Receipt:
-  `gammainc_grad_edges_finite` in `tests/test_ops_beyond_pin.py`.
-- Small: `MissingOpError` moved above the `SUPPORTS_*` flags it had split;
-  a dead `rnn` module import in `src/__init__.py`; NOTICE's path.
-- **Pre-existing, found through the series' REPORT aside — linalg gradients
-  were silently ZERO** for inv / det / solve / lu_factor / cholesky / eigh /
-  svd / lstsq / pinv (qr, norm, solve_triangular were fine). Mechanism, with
-  minimal repros in linalg's module docstring: tinygrad 0.13 swaps a
-  realized tensor's graph for its buffer and `Tensor.gradient` returns zeros
-  upstream, no error; `.item()` does the same to every `.contiguous()` node
-  upstream of what it reads. The loops called `.realize()` per step and the
-  validity checks read the returned factors. Fix = architecture invariant
-  12 (new): `_cut` (`contiguous().contiguous_backward()`) in the loops, host
-  checks on a side graph of the detached input, none under the trainer's
-  tape (`core.in_custom_gradient_tape`; `eig` raises there). The ops
-  now match finite differences of the numpy reference
-  (`test_linalg_gradients_are_not_silently_zero`).
-- **The first version of that fix stalled the box** (load average 174, the
-  owner killed the process from the host): fully lazy Jacobi is superlinear
-  in rotation rounds and keras' `test_svd` (4, 30, 20) is 190 of them. Now
-  `linalg._JACOBI_LAZY_ROUNDS = 110`: below, lazy + differentiable; above,
-  realize per round as before (no gradient; RAISES inside a train step).
-  Measurements and the not-done real fix (closed-form gradient
-  re-attachment): architecture.md "known leaks". Lesson kept in code, at
-  the owner's suggestion: every test subprocess runs under
-  `tests/_limits.py` (4 GB address space, 1800 CPU-s, nice; receipts in
-  `tests/test_limits.py`), and `scripts/referee.sh` caps its run
-  (`REFEREE_MEM_MB`=8192, per-test `REFEREE_TEST_TIMEOUT`=900 via
-  pytest-timeout, nice). Re-run of the stalling test under a 6 GB cap
-  before the fix: MemoryError in 75 s, load 2. `make referee` now calls
-  `bash scripts/referee.sh` (the file is mode 644 in git).
-- NOT fixed, same mechanism, needs an audit: every other mid-forward host
-  read — `core.cond` / `while_loop` predicates (`.numpy().item()`), the
-  index/argument reads in `ops/numpy.py` (13 `.item()` sites). They only
-  bite when the value read sits downstream of a `.contiguous()` node that
-  is also upstream of the loss (nn.py has 3 such nodes, numpy.py 2, core
-  5), and the jitted train step already refuses host reads loudly — the
-  exposure is the EAGER fallback path. `make fuzz-grad` could not have
-  caught the linalg zeros: `tools/parity_fuzz.py` has no linalg case at all.
-- **Version 0.2.0** (pyproject, `__version__`, uv.lock — owner's call,
-  2026-09-21): `keras.src.backend.tinygrad`, importable on the PyPI
-  0.1.0 / 0.1.1 wheels, no longer exists; the backend is
-  `keras_tinygrad.src`. Not tagged, not published.
-- **The referee had been running on the wrong tinygrad**: referee.sh took
-  the first `"tinygrad…"` string in pyproject — the KEYWORD — as the pin,
-  so `.referee/venv-*` got the latest release (0.14.0 since 2026-08-30;
-  the 2026-09-01 tally of record was taken on it). On 0.14 the ops/numpy
-  suite has 49 extra failures (`Cannot map tinygrad dtype dtypes.weakint /
-  weakfloat to Keras` — python-scalar dtypes, a real item for the day the
-  pin moves) plus a zig cc compile error in test_power. Fixed: the grep
-  wants a version operator, an existing venv is re-pinned on every run,
-  and the preflight prints the tinygrad version.
-- Owner call left open: whether the gammainc gradient receipt (~1 min of
-  first-use compile) belongs in `make verify`.
-
-Receipts (2026-09-21, final working tree, this box with `CC=zigcc`; every
-referee number below is on the PINNED tinygrad 0.13.0 — runs earlier the
-same day were on the accidental 0.14.0 and are void):
-
-- `make verify`: ruff + the F821 pass over the backend sources + format
-  clean, **53 passed** (2:41). `make smoke`, `make tutorial`,
-  `make vendor-check`, `make readme-check`: green.
-- `bash scripts/referee.sh keras/src/ops/numpy_test.py`: **3 failed /
-  5,444 passed / 708 skipped** — the three known (unique, vectorize,
-  test_cross). The script prints them as NEW because
-  `scripts/referee-baseline.txt` only covers the layers tree.
-- `… keras/src/ops/{linalg,math,image}_test.py`: **695 passed / 17
-  skipped**, the same tally as the unmodified `cf75be8` tree (that
-  comparison run was on 0.14.0); includes the `test_svd` that stalled the
-  box.
-- Known wart, also on the unmodified tree: a process that imported
-  tensorflow (ops/image_test, the preprocessing tree) aborts AT EXIT with
-  tinygrad 0.13 — `free(): invalid pointer`, exit 134, after pytest's
-  complete summary. referee.sh tolerates exactly that shape with a loud
-  WARNING (any abort without a final summary is still a crash) and sets
-  `ulimit -c 0` (each abort left a ~1 GB core file in `.referee/`).
-- Layers tree, the tally of record (`bash scripts/referee.sh`, 0:25:36):
-  **5 failed / 1,988 passed / 215 skipped / 1 xpassed** — "OK — failed
-  set == baseline (5 known)", identical to the 2026-09-01 tally (which was
-  taken on tinygrad 0.14.0; this one is the first on the pinned 0.13.0).
-  The exit-time abort above fired after the summary, as expected.
-
-## 2026-09-21 (later) — tinygrad 0.13 → 0.14, owner's decision
-
-Uncommitted, on top of `be50656` (which holds everything in the section
-above). Pin: `tinygrad>=0.14,<0.15`; `.venv`, uv.lock and the referee venv
-follow. What the move broke, smallest blast radius last:
-
-- **ops/numpy dtype leaks (49 referee failures)**: a python scalar is typed
-  `weakint` / `weakfloat` on 0.14 and `int8_tensor + 1.0` comes back typed
-  `weakfloat` — a dtype that exists only in tinygrad's promotion lattice.
-  `_pair` and `clip` had left that promotion to tinygrad; they now cast the
-  tensor operand to keras' own `result_type` first (right on any version).
-- **int tensor ** int tensor**: tinygrad has no integer pow (`# TODO: int
-  pow` in both versions); 0.14 renders the float route as C no compiler
-  accepts (keras' `test_power`). `numpy._int_power`: exact
-  square-and-multiply, numpy's wrap-around, no float — also exact past
-  2**24, where the old route was not.
-- **The vendored exporter**: upstream's v0.13.0..v0.14.0 diff of
-  `extra/export_model.py` (eight hunks: PARAM slots, `is_bound_var`,
-  `prg.src[2]`, `NUM_CPU_THREADS`, AddrSpace-based symbolic vars) applied to
-  `_vendor/export_model.py`. Python-side tests green; the exported bundle
-  RUNNING in a browser is NOT re-verified (`make browser-assets` + the m0
-  experiment is the check — owner's box).
-- **The one that matters — the jitted train step silently froze state.**
-  On 0.14 `.contiguous().realize()` no longer turns a CONST into a buffer,
-  so a Variable assigned from a python scalar had no buffer to pin and was
-  baked into the capture: `Mean.reset_state()` assigns 0 → the loss
-  tracker's `count` froze at the first replay and `fit` reported a loss of
-  exactly 0.0 from epoch 2; Adam's `iteration` (initialized from 0) froze →
-  stale bias correction, a different trajectory. Weights kept training, so
-  NOTHING failed: `make smoke` printed SMOKE OK with losses
-  `[13.2, 0.0, 0.0, 0.0, 0.0]` (its only assert is last < first — worth
-  tightening, owner's call), and the referee had been running on 0.14 by
-  accident since 2026-08-30 without a red test. Fix: `core._concrete`
-  (architecture invariant 5). Receipt:
-  `test_jitted_train_step_keeps_every_variable_in_step_with_eager` — all
-  model / optimizer / metric variables, JIT vs eager. How it was found, for
-  the next bump: diff every variable between `KERAS_TINYGRAD_TRAINER_JIT=1`
-  and `=0` after a 2-epoch Adam fit. Do that FIRST.
-- Unchanged on 0.14 (re-probed): realize / host reads zero the gradients
-  upstream (invariant 12), `JitError` on a host read at capture. Gone on
-  0.14: the tensorflow exit-time abort (referee.sh still tolerates it).
-  New on 0.14: the CPU device runs a worker pool — load average ~20 during
-  a referee run where 0.13 showed ~2; pin with `taskset`.
-
-Receipts (all on tinygrad 0.14.0, final tree): `make verify` **54 passed**;
-`make smoke` (losses 5.80 → 0.64), `make tutorial`, `make vendor-check`,
-`make readme-check` green; ops suites numpy + linalg + math + image
-**3 failed / 6,139 passed / 725 skipped** — the three known (unique,
-vectorize, test_cross), the same totals as on 0.13; layers tree, the tally
-of record, **5 failed / 1,988 passed / 215 skipped / 1 xpassed**, "OK —
-failed set == baseline (5 known)" (0:36:49 on 5 pinned cores).
+- Keras' layers tree, preprocessing included (`make referee`): **5 failed /
+  1,988 passed / 215 skipped / 1 xpassed** — the failed set equals
+  `scripts/referee-baseline.txt` (2× upstream float8, 2× RandomCrop, 1×
+  AutoContrast; reasons in README "Status").
+- ops suites numpy + linalg + math + image: **3 failed / 6,139 passed /
+  725 skipped** — unique, vectorize (data-dependent shapes, decision
+  pending: `docs/unique-vectorize.md`), test_cross (fixed upstream).
+- `make verify` 60 passed; `make e2e` 4 passed / 1 skipped (Pyodide flow
+  is network-gated); `make fuzz` 100/100, `make fuzz-grad` 60/60; `make
+  examples` 4/4 (all 2026-09-28).
 
 ## How to run anything
 
 ```sh
-# the referee (Keras' own layers tree, ~25 min; clones + builds .referee/
-# on first use, compares FAILED set to scripts/referee-baseline.txt):
-make referee
-# ~1 min slice of the same suite (known failures stay green, any other is red):
-make referee-quick
-# any keras path, e.g. the ops suites:
-scripts/referee.sh keras/src/ops/numpy_test.py
-# dev loop (uv-based; .venv resolves keras 3.15.1):
-make verify     # ruff lint + format + loader tests + backend regression receipts (~3 min since 2026-09-21)
-make smoke tutorial fuzz vendor-check readme-check
-make browser-assets   # regenerate every browser artifact (bundles, pages, tf.js) — none are in git
+make verify          # lint + format + undefined-names pass + fast tests (~3 min)
+make smoke tutorial examples fuzz fuzz-grad vendor-check readme-check
+make referee         # Keras' layers tree (~30 min); clones the pinned tag into .referee/
+make referee-quick   # ~1 min slice: backend/optimizer/core ops + Dense
+bash scripts/referee.sh keras/src/ops/numpy_test.py   # any keras path
+make browser-assets  # every generated browser artifact -> js/demo/build/ (gitignored)
+make e2e             # headless Chromium drives the hub through five asserted flows
+make referee-cl      # the quick slice on tinygrad's OpenCL device, no GPU needed (PoCL from PyPI)
+make bench           # CPU benchmark vs the tensorflow/jax/torch backends (~8 min; bench/results/)
+uv run python scripts/run_keras_guide.py <path/to/keras-io/guides/x.py>   # one keras.io guide, capped
+cd js && bun test/run.mjs                              # the npm package's own tests
 ```
 
-`CC=zigcc` matters: this box has no clang; the shim at
-`/home/dev/.local/bin/zigcc` makes tinygrad's CPU jit compile via the
-ziglang wheel (translated target triple, `-g0`). Real CI uses real clang.
+On this box `CC=zigcc` (no clang; the shim execs `zig cc`). Real CI uses
+clang. Every test subprocess and the referee run under resource caps
+(`tests/_limits.py`): an uncapped runaway graph pinned this box once.
 
-## The rules that shaped the code (do not regress them)
+## The rules (do not regress them)
 
-Full list: `docs/architecture.md` (12 invariants). The load-bearing ones:
-numpy backend is the semantic reference; Keras' own tests are the referee;
-NO silent numpy fallbacks in differentiable paths (loud NotImplementedError);
-copy-on-convert (tinygrad wraps numpy zero-copy + lazy reads);
-monkeypatches additive+guarded only; every keras-core touchpoint gets a
-loader patch-table anchor in the same change.
+`docs/architecture.md` holds the twelve invariants; update it in the same
+diff that moves a boundary. The load-bearing ones: the numpy backend is the
+semantic reference; Keras' own tests are the referee, a red test stays red
+(never skipped, never worked around); no silent numpy fallbacks in a
+differentiable path, loud `NotImplementedError` over a wrong answer;
+copy-on-convert; monkeypatches additive and guarded only; every keras-core
+touchpoint has a loader anchor; a differentiable op never realizes on the
+path to what it returns (host reads go through `core.host_read`).
 
-## Known remainders (smallest first)
+The owner reviews and commits every diff himself. Never commit or push.
 
-1. ~~Fuzzer papercuts~~ RESOLVED 2026-08-03: the "exits 0 despite FAIL"
-   claim was stale — the real bug was the printed repro command omitting
-   `--kinds`/`--tol-scale` (a FAIL reproduced as a silent PASS, or "case
-   not found"); fixed, plus a new guard: a run where NO case compares
-   (dead reference → all SKIPPED) now exits 2, never 0. float64 promotion:
-   DECIDED + IMPLEMENTED (Option A, fuzzer side) — ref-float64/test-float32
-   is ok-with-note under float32 tolerances, reverse direction still fails;
-   backend unchanged; fuzz `--seed 0 --cases 80 --kinds op` now 80/80.
-   Mechanism + decision record: `docs/float64-promotion.md`.
-2. ~~ops/math stub tail~~ RESOLVED 2026-08-03, fully green: 49 of 53 red
-   fixed mechanically (cdist, logdet, segment_max/min/prod; segment_sum
-   refactored onto a shared prepare helper), the last 4 via the
-   complex-lite ComplexTensor interop (docs/complex-support.md).
-3. ~~ops/numpy tail~~ RESOLVED 2026-08-03 in three waves (fix wave, port
-   wave A, port wave B): **5502 passed / 3 failed / 708 skipped** from
-   4309/1196/708 at triage. All silent-wrong bugs fixed (diag/dot/
-   isclose+allclose/signbit-bitcast), pad reflect/symmetric, 32 argument
-   crashes, ~45 ops ported (nextafter ulp-bitcast, tensor Euclid gcd/lcm,
-   sort-based percentile/quantile family, window fns, nan-family, etc.),
-   full bucket-(b) promotion alignment (arctan2/average/einsum/power/
-   prod/cumsum/matmul/max/min/square). The 3 red: unique + vectorize
-   (DECISION ITEMS: data-dependent output shapes — implement host-side
-   with realize, or stay loud; owner call) and test_cross (test-side:
-   numpy 2.x removed 2-element np.cross, the test's own reference crashes;
-   upstream-PR bucket). Zero regressions at every wave; math_test 208/0/4
-   throughout. NOTE: tutorial's loud-stub demo now uses ops.unique (its
-   rot90 demo broke when rot90 landed — the executable tutorial caught it).
-4. Dev tooling landed 2026-08-03: uv + ruff (line-length 120, the backend
-   sources
-   excluded — it must stay byte-identical to the clone), Makefile
-   (verify/tutorial/smoke/fuzz/vendor-check), executable TUTORIAL.md
-   enforced by tests/test_tutorial.py, CI rewritten onto uv+make.
-   Repo-owned code ruff-formatted; anchors re-verified after.
-   requires-python fixed to >=3.11 (keras 3.15's own floor). keras 3.15.1
-   now runtime-verified (uv .venv resolves it; loader suite + tutorial
-   train against it).
-5. ~~TF venv for preprocessing/ops-image collection~~ RESOLVED 2026-08-03:
-   /home/dev/workspace/tf-venv (uv-managed CPython 3.12.13, tensorflow-cpu
-   2.21 + jax + grain, clone keras editable). Referee results AT VENV
-   CREATION (superseded — current numbers live in the README matrix):
-   ops/image 306/25/5 (92.4%), preprocessing tree 679/14/29 (98.0%) after
-   3 real bug fixes in the clone's numpy.py (TrackedList shapes in
-   reshape/broadcast_to — tinygrad argfix does exact-class checks; 0-d
-   Tensor pad widths read out as host ints). Remaining red: 35 tests =
-   four missing image ops (perspective_transform, sobel_edges,
-   gaussian_blur, elastic_transform — next mechanical work item);
-   RandomCrop x2 (tinygrad __getitem__ rejects Tensor slice bounds —
-   add to the tinygrad-upstream dunders conversation); AutoContrast x1
-   (FMA contraction residual 1.9e-06 vs atol 1e-06); grain x1 (thread
-   pool vs tinygrad's process-global sqlite kernel cache).
-6. Fused RNN kernels (lstm/gru fast path) — generic scan is correct, slower.
-7. ~~TinyJit on the train step~~ LANDED 2026-08-03: `_TrainStepJit` in
-   trainer.py — per-batch-signature captures, pinned-buffer weight
-   propagation, loud-JitError-at-capture fallback to eager (tape/schedules/
-   RNG hazards), 12-scenario bit-for-bit eager parity, ~5–15x steady-state
-   steps/sec (~2.3x even on the warmup epoch). Escape hatch
-   KERAS_TINYGRAD_TRAINER_JIT=0. Known residue: keras/src/trainers
-   collection needs a test-side backend branch (same upstream bucket as
-   float8); validation scripts preserved in the session scratchpad.
-   test/predict paths still eager — the remaining smaller lever.
-8. Upstream float8 test branch (keras test files) — part of any upstream PR.
-9. Keras 3.16 / `pluggable_backend` drift (2026-09-21, static check —
-   `docs/upstream/keras-master-and-branch-status-2026-09-21.md`): master
-   moved every backend's ops into an `ops/` subpackage (`backend.ops.numpy.x`)
-   and rewrote the `DynamicBackend` anchor — the package now HAS that shape
-   (`keras_tinygrad/src/ops/`, both spellings exported, the loader's
-   patches import `keras_tinygrad.src` directly, no alias), so only the
-   anchor is left for 3.16; the branch resolves plugins from a hard-coded frozenset
-   (`tinygrad` not in it) and OpenVINO now lives out of tree in
-   `keras-team/keras-openvino`, the layout to mirror. Landed alongside:
-   the master-only ops (`copysign`, `float_power`, `cov`, `lgamma`,
-   `gammainc`; `tests/test_ops_beyond_pin.py`), `core.MissingOpError`
-   (master's `hasattr` probes on the backend), the shim's `BackendLayer`
-   name and the removed `src/export.py` (branch protocol).
+## Open items
 
-## Plugin-backends PoC (2026-08-10) — WORKING
+Technical, smallest first:
 
-`docs/upstream/keras-plugin-poc.md`. A keras fork (worktree
-`/home/dev/workspace/keras-plugin-fork`, branch `plugin-backends`, all
-uncommitted) adds `keras/src/backend/plugins.py` + generalizes the six
-dispatch `else:` tails to resolve the `keras.backends` entry-point group.
-Result: on the fork, plain `KERAS_BACKEND=tinygrad python -c "import
-keras"` loads this backend with ZERO patches and no hook (referee
-dense_test 70/1/1, identical to stock-path). The pip package now declares
-the entry point (inert on stock keras) and the hook stands down when it
-detects native plugin support; stock path re-verified green. This branch
-is the living demo for the eventual upstream design issue — sequencing in
-the PoC doc. NOTE: the zigcc shim now execs via
-`/home/dev/workspace/zig-venv` (old ktg-venv is gone).
+1. `ops.unique` / `ops.vectorize` — loud stubs; data-dependent output
+   shapes need a design decision (`docs/unique-vectorize.md`).
+2. Fused RNN kernels — the generic scan is correct and slow.
+3. Jacobi eigh/svd above `linalg._JACOBI_LAZY_ROUNDS` carry no gradient
+   (raise inside a train step); the real fix is closed-form re-attachment.
+4. test/predict paths are eager per step; only the train step is jitted.
+5. **CPU benchmark of record exists** (`make bench`, `bench/README.md`,
+   `bench/results/2026-09-28-cpu-3cd22935c208.md`): MLP / small CNN /
+   LSTM across tinygrad, tensorflow, jax, torch, same 4 pinned cores, same
+   init, same data, one capped process each; per-step losses agree across
+   all four backends to ~1e-7 for the first 10 steps (the like-with-like
+   proof). Steady train step, this box: MLP 0.048 s vs 0.004-0.007 s;
+   CNN 0.48 s vs 0.02 s; LSTM 1.16 s vs 0.006-0.018 s; tinygrad's first
+   step is compile-bound (118 s for the LSTM). Read as facts about this
+   run on this box. No real-GPU run of record for anything; the
+   browser bench is SwiftShader-only. This box has no GPU and no root.
+   Two no-hardware paths exist since 2026-09-28: `make referee-cl`
+   (`scripts/with_cl.sh`: PoCL from PyPI behind the system ICD loader →
+   tinygrad's OpenCL renderer on the CPU; referee-quick slice **244
+   passed / 1 failed (the known float8) / 18 skipped** in 3:06, same
+   failed set as CPU) and `DEV=PYTHON::sm_80|METAL|gfx1100` (tinygrad's
+   UOp interpreter with that GPU's renderer rules; a 4-step MLP fit takes
+   10-20 s, so spot checks only). Neither is a GPU: memory model, driver
+   and timing stay unverified until the owner's Metal box or a cloud
+   runner runs the referee.
+   The CL path already paid for itself: `model.evaluate` was
+   intermittently WRONG there (224.0 or 0.0 instead of the predict-MSE,
+   ~1 run in 3). Root-caused 2026-10-02, OURS: the backend declared
+   `IS_THREAD_SAFE = True` (copied from the numpy backend; tensorflow says
+   False), so keras' `CallbackList` dispatched batch-end hooks to a
+   ThreadPoolExecutor and the per-batch metric read ran on a worker thread
+   while the main thread launched the next batch's kernels — tinygrad sets
+   kernel arguments in place on one `cl_kernel` per program and its LRU
+   allocator has no lock, so the worker's launch ran with the other
+   thread's arguments and the copyout returned a stale buffer (7×32 =
+   224). The CPU device's launch path is synchronous, which is the only
+   reason it never misfired there. Fix: `IS_THREAD_SAFE = False` — every
+   host read stays on the thread that drives the device. Receipts:
+   `tests/test_device_cl.py` (thread-affinity spy, runs everywhere; a
+   40-evaluate agreement loop under `KERAS_TINYGRAD_TEST_CL=1` +
+   `scripts/with_cl.sh`, the one skip the suite allows, reason stated),
+   probe 10/10 after vs ~1 in 3 wrong before, `make referee-quick` same
+   tally as before. This is exactly the class of bug a real GPU would have
+   surfaced in production; the emulated device found it first.
+6. ~~`tensor + Variable` raises~~ FIXED 2026-09-28: tinygrad's binary
+   dunders answer `NotImplemented` for a KerasVariable operand so python
+   reaches the Variable's reflected op (ops/core.py, next to the DType
+   patch; receipts `tests/test_variable_interop.py`: 17 operators, a
+   layer written `inputs * self.w + self.b` trains bit-for-bit like its
+   keras.ops twin, junk operands keep tinygrad's own error; `abs(Variable)`
+   too — tinygrad had `abs()` but no `__abs__`, keras' own
+   `variables_test.test__abs__` was red). Referee: `VariableOpsCorrectnessTest`
+   37/37; the slice's other 114 failures are complex64/128 dtypes (declared
+   unsupported), the torch-dtype test and the known float8. The keras.io
+   guide that found it now gets past the backend and fails on a
+   keras-io-vs-3.15.1 issue that the TENSORFLOW backend reproduces
+   identically (its `load_own_variables` store key resolves to the
+   kernel) — upstream script, not ours.
+7. ~~LSTM is unusably slow on CPU~~ FIXED 2026-09-28, three stacked causes
+   (`tests/test_rnn_perf.py`, referee `keras/src/layers/rnn` 76 passed / 3
+   skipped): (a) the JIT was silently OFF for every recurrent model — the
+   cells' `DropoutRNNCell` mix-in owns a SeedGenerator, the gate saw it and
+   fell back without a warning; the cells now join `_device_rng_covers`;
+   (b) the scan was one lazy graph over all timesteps and tinygrad's
+   rewriter is superlinear in it (one steady step: 451 kernels, 90 s of 86
+   in `unified_rewrite`, 0.35 s executing) — `rnn._cut` per timestep;
+   (c) found by the cuts, PRE-EXISTING and silent-wrong: `train_step`
+   updated the loss tracker (a realize) BEFORE `compute_gradients`, which
+   zeroed gradients upstream of any forward barrier — rnn cuts, `log1p`,
+   linalg loops. Gradient graph is built first now (receipt
+   `test_train_step_gradients_survive_forward_barriers`). LSTM(32), batch
+   32, `train_on_batch`, first / eager steady / JIT replay: T=10 85 s /
+   6-7 s / **1.0 s** (was 35 s), T=25 106 / 9-10 / **1.5 s**, T=50 144 /
+   35 / **6.9 s** (was >500 s). The first step is still ~300 kernels
+   through zig cc. Gradients match the tensorflow backend to ~1e-7.
+7b. **`train_on_batch` reported a running mean** (found chasing an "Adam
+   diverges from tensorflow after step 1" that was nothing of the kind:
+   Adam's arithmetic on fixed gradients is identical to numpy and
+   tensorflow to the last digit; our reported loss at step k was the mean
+   of the per-batch losses 1..k). The numpy trainer this one was ported
+   from never resets metrics in `*_on_batch`; tensorflow/jax/torch do.
+   Fixed, receipt `tests/test_on_batch_semantics.py`; keras' own
+   `trainer_test.py -k on_batch` 6/6 with the drafted test-side patch
+   applied to a scratch referee tree (the module refuses unknown backends
+   at import — the upstream item in `docs/history/upstream/keras-pr/`).
+8. keras.io guides as a second referee: `scripts/run_keras_guide.py`
+   (capped runner, `--no-plot-model` stands in for graphviz) ran 8
+   canonical backend-agnostic guides — 6 pass (5 in ~1 min total;
+   `functional_api` in 12 min on 2026-10-02 with the real 170 MB CIFAR
+   download and its Embedding+LSTM(128) section, after the LSTM fix —
+   it timed out at 15 min before), 2 fail on keras-io-vs-3.15.1 script
+   issues the tensorflow/numpy backends reproduce. A `scripts/guides.sh` +
+   `guides-baseline.txt` in the referee's shape is the proposal; 23 of
+   the 35 guides import tensorflow/jax/torch at the top and would need
+   the referee venv.
+9. **Browser runner conveniences the July spikes had and `js/` does not**
+   (audit 2026-10-02, `docs/history/experiments-2026-07/README.md`): weight
+   readback/write-in on a live runner (`COPY_SRC|COPY_DST` + a weightBufs
+   map), the optimized-I/O runner (`queue.writeBuffer` uploads, optional
+   loss readback — 3-30x on Firefox's 100 ms fence tick), a forward-only
+   export, a fake-WebGPU plumbing test of the emitted runner, a JS
+   safetensors writer, conv nets through the Keras browser path. None is
+   a backend feature; the first two are the ones worth having back.
+10. Upstream tinygrad candidates: Tensor slice bounds in `__getitem__`
+   (blocks RandomCrop), argfix's exact-class check, the dunders patch
+   (`docs/history/upstream/tinygrad-draft.md`).
 
-## Decision queue (owner's, not yours)
+Owner's decisions pending:
 
-- Commits/checkpoints in the clone and this repo.
-- Publishing this repo + PyPI name claim.
-- tinygrad upstream PR (draft ready in `/home/dev/workspace/tinygrad-upstream/DRAFT_PR.md`;
-  their rules require AI-assistance disclosure; `__bool__` half needs an
-  issue first — it reverts a deliberate upstream ban). Two more candidates
-  found 2026-08-03: Tensor slice bounds in `__getitem__` (blocks
-  RandomCrop) and argfix's exact-class tuple/list check (worked around
-  backend-side for TrackedList).
-- keras upstream — LANDSCAPE CHANGED 2026-08-21 (see
-  /home/dev/workspace/KERAS_COMMITS_AND_ORDER_GUIDE.md §0): the keras team
-  is building pluggable backends itself (PRs #23397/#23410 + branches;
-  official keras-team/keras-mlx and keras-team/keras-openvino plugin
-  repos; `keras_<name>` naming convention — ours already matches; master
-  landing rewound 2026-08-20, effort continues). The old plan (design
-  issue proposing entry points) is obsolete; new plan: engage as an
-  independent pilot plugin. Also: test_cross was fixed upstream (#23408
-  merged 2026-08-11, incl. the numpy-backend companion) — our PR-1a is
-  dead. Original reasoning kept for the record: (Chollet's criteria in
-  keras#20793; keras#23193, the closed MLX PR, has been reincarnated as
-  the pilot plugin of the official program). READY TO DROP: docs/upstream/keras-pr/ has
-  tests-fix.patch (git-apply-clean, 4 files) + PR_BODY.md for the
-  test-side bundle (test_cross numpy>=2.5 guard, float8 skipif,
-  trainer_test fallback; ViewAsComplex skip deliberately dropped — we pass
-  those now). Full analysis: docs/upstream-keras-draft.md — including a
-  verified companion fix for the numpy BACKEND's own broken cross
-  (numpy.py:554, red under numpy>=2.5), excluded from the test-side patch,
-  owner decides whether to bundle it. tinygrad additions:
-  docs/upstream-tinygrad-draft.md (slice bounds path traced to
-  tensor.py:878/movement.py:87, argfix isinstance one-liner).
-- NNVP integration M0: trace a Keras TrainStep on tinygrad NULL device →
-  WebGPU runner. **PROVEN 2026-08-30** — `experiments/m0-keras-trainstep/`
-  (Keras Sequential + SGD + sparse CE exported to a self-contained WebGPU
-  runner that trains in headless Chromium; two real bugs found and fixed,
-  see its README). The browser-training story and what to reuse from the
-  migrated nnvp experiments: `docs/browser-training.md`.
-
-## Related artifacts elsewhere
-
-- `/home/dev/workspace/tinygrad-upstream` — dunders patch + DRAFT_PR.md.
-- nnvp scratchpad (session-tied, may be gone): design doc, build story,
-  Pyodide harness. The build story was delivered to the owner directly.
-- The owner's nnvp project memory has a condensed version of this file.
+- Tag `v0.2.0` (rerun the full referee first; `CHANGELOG.md` has the
+  notes; it removes the `keras.src.backend.tinygrad` path 0.1.0 exposed).
+- First npm publish, `js-v0.0.1` — account-side steps in
+  `docs/npm-publishing.md` "Status".
+- Engage on keras' pluggable-backends RFC (keras#23523) as the external
+  pilot; the history of that thread and the drafts: `docs/history/upstream/`.
+- Whether the gammainc gradient receipt (~1 min compile) belongs in
+  `make verify`; whether the fuzz case counts should rise now that linalg
+  cases share them.
+- The repo setting "Allow GitHub Actions to create and approve pull
+  requests" for keras-watch's PR step.

@@ -12,7 +12,7 @@ remain unfixed on both master and the team's `pluggable_backend` branch
 `/home/dev/workspace/KERAS_COMMITS_AND_ORDER_GUIDE.md` §1/§3: offer them
 during engagement with the pluggable-backend effort, targeting whichever
 tree the maintainers prefer. A ready-to-apply PR package (patch +
-neutral PR body) lives in `docs/upstream/keras-pr/` (`tests-fix.patch`,
+neutral PR body) lives in `docs/history/upstream/keras-pr/` (`tests-fix.patch`,
 `PR_BODY.md`); this document is the keras-tinygrad-side rationale with
 full citations. All line numbers are against the reference clone at
 `/home/dev/workspace/keras` (master, `abd068b3`), whose test files are

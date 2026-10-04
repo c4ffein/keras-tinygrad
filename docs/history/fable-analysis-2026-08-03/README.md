@@ -1,4 +1,11 @@
-# FABLE_ANALYSIS — a thorough review of keras-tinygrad
+# FABLE analysis (2026-08-03) — a thorough review of keras-tinygrad
+
+> **Historical snapshot (2026-08-03).** Kept as the record of what an
+> independent review found at the time; several findings below have since
+> been resolved and its file:line references predate the pluggable-backend
+> layout (`_backend/` → `src/keras_tinygrad/src/ops/`, `sync_vendor --check`
+> gone with the sibling clone, the tinygrad pin now bounded `>=0.14,<0.15`,
+> the setuptools floor raised to 77). Current state: `HANDOFF.md`.
 
 *Produced 2026-08-03 by Claude Fable 5: five parallel deep-dive agents (each reading its subsystem in full, two of them empirically testing the live backend), synthesized here. Read this file first; each chapter stands alone with file:line evidence.*
 

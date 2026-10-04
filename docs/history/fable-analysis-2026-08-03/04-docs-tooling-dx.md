@@ -24,7 +24,7 @@ The README's numbers were checked against the generator and against each other:
 
 The real problem is the inverse of cherry-picking: those two rows **cannot come from the script's `--run` mode**, because they are absent from `SUITES` (`gen_support_matrix.py:52-73`). They can only have been fed in via `--from-log` with hand-written `=== <suite>` headers. So the published table is a merge of generated and hand-assembled data, and a future `--run --inject` would silently *drop* the two biggest suites from the table. HANDOFF compounds the confusion by saying "18 suites" (`HANDOFF.md:32`) when the script has 17 and the README shows 19 rows.
 
-One metric caveat worth stating in the README rather than only in a script docstring: with 762 skips excluded from the denominator (708 of them the sparse-gated ops/numpy skips, `docs/ops-numpy-triage.md:18-21`), "coverage 99.9%" measures *correctness of what runs*, not *fraction of Keras surface supported*. The skips are legitimately backend-gated and documented, but a hurried reader will read the wrong claim.
+One metric caveat worth stating in the README rather than only in a script docstring: with 762 skips excluded from the denominator (708 of them the sparse-gated ops/numpy skips, `docs/history/ops-numpy-triage-2026-08-03.md:18-21`), "coverage 99.9%" measures *correctness of what runs*, not *fraction of Keras surface supported*. The skips are legitimately backend-gated and documented, but a hurried reader will read the wrong claim.
 
 ### Where the copies have drifted
 

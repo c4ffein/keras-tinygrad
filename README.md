@@ -17,7 +17,7 @@ Every release is certified by a public workflow that installs the package
 
 Also runs plugin-style on Keras' in-development
 [pluggable-backend branch](https://github.com/keras-team/keras/tree/pluggable_backend)
-with zero patches (see the [pilot report](https://github.com/c4ffein/keras-tinygrad/blob/main/docs/upstream/pluggable-branch-pilot.md)).
+with zero patches (see the [pilot report](https://github.com/c4ffein/keras-tinygrad/blob/main/docs/history/upstream/pluggable-branch-pilot.md)).
 
 ```python
 import keras_tinygrad  # must come first: installs the import hook
@@ -46,6 +46,8 @@ That is the whole API. Everything after the first line is literally just Keras.
 ```sh
 pip install keras-tinygrad
 ```
+
+Release notes: [CHANGELOG.md](https://github.com/c4ffein/keras-tinygrad/blob/main/CHANGELOG.md).
 
 New here? Start with **[TUTORIAL.md](https://github.com/c4ffein/keras-tinygrad/blob/main/TUTORIAL.md)** — every code block on
 that page is executed by CI, so it cannot rot.
@@ -84,7 +86,7 @@ compares the failed set to `scripts/referee-baseline.txt`. Earlier tallies
 re-verified 2026-08-27 and 2026-08-30 — had the same 5 failures; the one
 fewer test is the tree, not a regression.) All 5 failures are individually
 documented: 2× upstream `test_quantize_float8` (test-side `train_one_step`
-only defined for tf/jax/torch — fix drafted in `docs/upstream/keras-pr/`),
+only defined for tf/jax/torch — fix drafted in `docs/history/upstream/keras-pr/`),
 2× RandomCrop (tinygrad `__getitem__` lacks Tensor slice bounds — upstream
 tinygrad item), 1× AutoContrast (FMA-contraction residual 1.9e-06 vs atol
 1e-06). Cross-backend parity fuzz vs the numpy reference (`make fuzz`;
@@ -152,13 +154,24 @@ tinygrad-sqlite-cache clash. Preprocessing/ops-image runs need tensorflow
 installed for test *collection* only.
 <!-- /SUPPORT_MATRIX -->
 
+### Performance
+
+Measured, not claimed: `bench/` runs an MLP, a small CNN and an LSTM
+across the tinygrad, tensorflow, jax and torch backends on the same
+cores with the same init and data, and checks the per-step losses agree
+before it prints a number. The latest results file is in
+[bench/results/](https://github.com/c4ffein/keras-tinygrad/tree/main/bench/results);
+on the one box measured so far (CPU only), tinygrad's steady train step
+is an order of magnitude behind the other backends and its first step is
+compile-bound. No GPU run of record exists yet.
+
 ### Known gaps
 
 Honest list:
 
 - `keras.ops.unique` / `keras.ops.vectorize` (data-dependent output
   shapes — loud stubs pending a design decision; the rest of the numpy
-  tail landed, see [docs/ops-numpy-triage.md](https://github.com/c4ffein/keras-tinygrad/blob/main/docs/ops-numpy-triage.md)).
+  tail landed, see [docs/history/ops-numpy-triage-2026-08-03.md](https://github.com/c4ffein/keras-tinygrad/blob/main/docs/history/ops-numpy-triage-2026-08-03.md)).
 - Fused RNN kernels (recurrent layers take the generic scan path — correct,
   not fast; the TinyJit train step recovers most of the gap).
 - Sparse and ragged tensors.
@@ -173,11 +186,14 @@ built through this backend can be traced once on a GPU-less device and
 exported as a WebGPU bundle: WGSL kernels plus a JS runner whose weight
 buffers update in place, so looping `step(x, y)` from JavaScript is SGD
 training. Verified two ways in
-[experiments/m0-keras-trainstep](https://github.com/c4ffein/keras-tinygrad/tree/main/experiments/m0-keras-trainstep):
+[browser](https://github.com/c4ffein/keras-tinygrad/tree/main/js/demo):
 the same step object under real execution trains to >80% held-out
 accuracy on separable synthetic classes (`m0.py cpu`), and the exported
 bundle trains in headless Chromium with an asserted loss curve
-(`check.sh`; software WebGPU). Current limits (batch size baked into the
+(`make e2e` — `tests/test_webgpu_export.py`, software WebGPU, also a CI
+job; it drives the hub through the JS package in `js/`, the runner and
+in-tab tracer that `npm install keras-tinygrad` will ship once its first
+release is published). Current limits (batch size baked into the
 trace, fixed learning rate, loss built with `reduction=None`; dense and
 dropout layers proven in the browser) and the roadmap:
 [docs/browser-training.md](https://github.com/c4ffein/keras-tinygrad/blob/main/docs/browser-training.md).
