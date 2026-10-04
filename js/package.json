@@ -1,10 +1,11 @@
 {
   "name": "keras-tinygrad",
   "version": "0.0.1",
-  "description": "Run Keras training steps in the browser on WebGPU — the JS side of the keras-tinygrad Python package (loads its exported bundles; in-tab tracing is the roadmap)",
+  "description": "Run Keras training steps in the browser on WebGPU — the JS side of the keras-tinygrad Python package: a runner for its exported bundles, and an in-tab tracer (real Keras under Pyodide) at keras-tinygrad/trace",
   "type": "module",
   "main": "src/index.mjs",
-  "exports": { ".": "./src/index.mjs" },
+  "exports": { ".": "./src/index.mjs", "./trace": "./src/trace/client.mjs" },
+  "scripts": { "test": "node test/run.mjs" },
   "files": ["src", "README.md", "LICENSE"],
   "keywords": ["keras", "tinygrad", "webgpu", "machine-learning", "training", "browser"],
   "author": "c4ffein",

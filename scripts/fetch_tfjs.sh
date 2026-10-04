@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Fetch the tf.js build the browser hub embeds — pinned version, sha256
-# verified, so the 1.4 MB file stays out of git (experiments/*/tf.min.js are
-# gitignored) yet every rebuild embeds exactly the bytes that were measured.
-#   scripts/fetch_tfjs.sh            # -> experiments/m0-keras-trainstep/tf.min.js
+# verified, so the 1.4 MB file stays out of git (tf.min.js is gitignored
+# everywhere) yet every rebuild embeds exactly the bytes that were measured.
+#   scripts/fetch_tfjs.sh            # -> js/demo/build/tf.min.js
 set -euo pipefail
 VERSION=4.22.0
 SHA256=300dfae273d20b4046f46a06d735688f03675a807561e9bcb5f664eb2f3d2831
-DEST=$(cd "$(dirname "$0")/.." && pwd)/experiments/m0-keras-trainstep/tf.min.js
+DEST=$(cd "$(dirname "$0")/.." && pwd)/js/demo/build/tf.min.js
+mkdir -p "$(dirname "$DEST")"
 URL="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@$VERSION/dist/tf.min.js"
 if [ -f "$DEST" ] && echo "$SHA256  $DEST" | sha256sum -c --quiet 2>/dev/null; then
   echo "tf.min.js $VERSION already present and verified"; exit 0

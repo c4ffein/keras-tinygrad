@@ -33,14 +33,25 @@ MEM_MB = int(os.environ.get("KERAS_TINYGRAD_TEST_MEM_MB", "8192"))
 CPU_SECONDS = int(os.environ.get("KERAS_TINYGRAD_TEST_CPU_S", "1800"))
 
 
-def child_limits():
-    """`preexec_fn` for subprocess.run: runs in the child, before exec."""
+def child_limits(address_space=True):
+    """`preexec_fn` for subprocess.run: runs in the child, before exec.
+
+    `address_space=False` keeps only the CPU-time cap and the nice: Chromium
+    reserves virtual address ranges far beyond its RSS (V8's pointer cage,
+    PartitionAlloc) and dies with SIGTRAP under ANY RLIMIT_AS — measured
+    2026-09-28 at 8, 16 and 32 GB on headless Chromium 1228 + SwiftShader.
+    The CPU-time cap alone still turns a hung page into a red test."""
     if resource is None:
         return
-    for limit, value in ((resource.RLIMIT_AS, MEM_MB << 20), (resource.RLIMIT_CPU, CPU_SECONDS)):
+    mem = MEM_MB << 20 if address_space else 0
+    for limit, value in ((resource.RLIMIT_AS, mem), (resource.RLIMIT_CPU, CPU_SECONDS)):
         if value > 0:
             try:
                 resource.setrlimit(limit, (value, value))
             except (ValueError, OSError):
                 pass  # a lower hard limit is already in force, or the OS ignores this one
+    try:  # a capped child that dies leaves no core file in the repo (Chromium's are 18 MB each)
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    except (ValueError, OSError):
+        pass
     os.nice(10)

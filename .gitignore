@@ -6,6 +6,17 @@ __pycache__/
 .ruff_cache/
 uv.lock
 .referee/
+.cl/
+.bench/
 build/
 dist/
-experiments/**
+node_modules/
+
+# Everything `make browser-assets` generates or fetches lands in ONE place:
+# js/demo/build/ (bundles, the hub page, tf.min.js, the wheel, ref curve,
+# run_local output). Sources are tracked; outputs never are.
+# `rm -rf js/demo/build` + the make target is the clean rebuild.
+js/demo/build/
+
+# the fetched tf.js build (scripts/fetch_tfjs.sh), wherever it lands
+tf.min.js

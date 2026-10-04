@@ -37,21 +37,21 @@ jobs:
         run: |
           v=$(bun -e "console.log(JSON.parse(await Bun.file('js/package.json').text()).version)")
           test "js-v$v" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} != js version js-v$v"; exit 1; }
-      - name: Module smoke + Python-parity check of the LCG stream
+      - name: js test suite (export surface, LCG Python-parity, loadBundle contract)
         working-directory: js
-        run: |
-          bun -e "
-          import { lcg32, importRunner, loadBundle, fetchBundle } from './src/index.mjs';
-          for (const f of [importRunner, loadBundle, fetchBundle]) if (typeof f !== 'function') throw new Error('missing export');
-          const g = lcg32();
-          const got = [g.rand(), g.rand(), g.gauss()].map(v => v.toFixed(6)).join(' ');
-          const want = '0.971873 0.250264 -0.113998'; // matches the Python twin bit-for-bit
-          if (got !== want) throw new Error('LCG drifted from the Python twin: ' + got);
-          console.log('smoke OK:', got);
-          "
-      - name: Pack (dry run)
+        run: bun test/run.mjs
+      - name: Pack (dry run, bun)
         working-directory: js
         run: bun pm pack --dry-run
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+      - name: Pack (dry run, npm — the tool the publish job actually uses)
+        working-directory: js
+        run: npm pack --dry-run
+      - name: Test suite under node too (package.json's `npm test`)
+        working-directory: js
+        run: npm test
 
   publish:
     needs: verify

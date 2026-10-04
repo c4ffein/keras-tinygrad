@@ -3,7 +3,7 @@
 THE single implementation of the browser-export recipe (previously
 hand-copied across experiments — three copies of subtle, load-bearing code
 is where the momentum-class bugs hide; see
-experiments/m0-keras-trainstep/README.md, "three bugs"):
+js/demo/README.md, "three bugs"):
 
     os.environ["DEV"] = "NULL:WGSL"          # BEFORE tinygrad is imported
     os.environ["NULL_ALLOW_COPYOUT"] = "1"

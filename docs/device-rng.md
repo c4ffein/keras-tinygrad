@@ -111,5 +111,5 @@ alternative to mask-as-input. Unverified through export yet.
    `validate_runner_js` passed), and in headless Chromium the SAME batch
    fed three times produced 3/3 distinct finite losses — the counter
    buffer advances across `step()` calls in WebGPU. Probe:
-   `experiments/m0-keras-trainstep/export_dropout_probe.py`.
+   `js/demo/export_dropout_probe.py`.
 3. A note in README's status section naming the deviation, same-diff.

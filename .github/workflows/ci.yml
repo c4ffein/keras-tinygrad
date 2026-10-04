@@ -19,9 +19,42 @@ jobs:
         run: make tutorial
       - name: MLP smoke test
         run: make smoke
+      - name: Every other example runs and passes its own assertion
+        run: make examples
       - name: Loader anchors match installed keras
         run: make vendor-check
       - name: README numbers internally consistent
         run: make readme-check
       - name: Byte-compile the backend sources
         run: uv run python -m py_compile src/keras_tinygrad/src/*.py src/keras_tinygrad/src/ops/*.py
+
+  js-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: js test suite (export surface, LCG Python-parity, loadBundle contract)
+        working-directory: js
+        run: bun test/run.mjs
+
+  # The browser e2e: regenerates the WebGPU bundles + hub, then drives the
+  # hub in headless Chromium (SwiftShader WebGPU) through the proof flows
+  # and asserts the page's own checks JSON — including the pyodide flow
+  # (in-tab trace must be loss-identical to the prebuilt bundle), which
+  # downloads Pyodide/PyPI from CDNs. Every run also exercises the npm
+  # package end-to-end: the hub embeds js/src/index.mjs for all bundle
+  # loading and batch streams.
+  e2e-browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: oven-sh/setup-bun@v2
+      - name: Install clang (tinygrad CPU backend compiler)
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - name: Install headless Chromium (playwright)
+        run: uv tool run playwright install --with-deps chromium
+      - name: Browser e2e suite
+        run: make e2e
+        env:
+          KERAS_TINYGRAD_E2E_PYODIDE: "1"

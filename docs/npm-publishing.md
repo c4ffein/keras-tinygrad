@@ -19,6 +19,15 @@ docs.npmjs.com (search: "trusted publishers").
   the FIRST publish bootstraps with a short-lived token that never
   touches a dev box (browser → GitHub secret → used once → revoked).
 
+## Status
+
+**Not published as of 2026-09-28** (`npm view keras-tinygrad` → 404; no
+`js-v*` tag on the remote). Everything in-repo is ready — the workflow, the
+test suite, the pack list (10 files, 40 KB unpacked: runner, tracer,
+worker, driver, shims, README, LICENSE) — the remaining steps are the
+account-side ones below, which need a browser and the owner's npm/GitHub
+accounts. The first publish is `js-v0.0.1`.
+
 ## First-time publish (or re-publish after starting over)
 
 1. **Browser** — npmjs.com: create/log into the account; enable **2FA**
@@ -34,8 +43,9 @@ docs.npmjs.com (search: "trusted publishers").
 5. **Any box with the repo** — make sure `js/package.json`'s `version`
    is what you intend, commit everything, then:
    `git tag js-v<version> && git push origin js-v<version>`
-   The workflow verifies (tag↔version guard, module smoke, the LCG
-   Python-parity check, pack dry-run) and publishes with
+   The workflow verifies (tag↔version guard, `js/test/run.mjs` — export
+   surface, LCG Python-parity, loadBundle contract, tracer defaults vs
+   the pyproject pin — and a pack dry-run) and publishes with
    `npm publish --provenance` using the secret.
 6. **Browser** — confirm npmjs.com/package/keras-tinygrad is live and
    shows the provenance attestation.
@@ -90,6 +100,7 @@ so if someone registers `keras-tinygrad` first:
 
 Same project, same repo, two registries: `pip install keras-tinygrad`
 (the backend + exporter) and `npm install keras-tinygrad` (the runner —
-loads exported WebGPU bundles; roadmap: in-tab tracing). The `lcg32`
+loads exported WebGPU bundles — plus `keras-tinygrad/trace`, the in-tab
+tracer: real Keras under Pyodide, needs the Python wheel's URL). The `lcg32`
 helper is bit-identical across both (CI enforces it against baked
 values); treat any drift as a breaking change on either side.

@@ -22,7 +22,7 @@ jobs:
       - name: run the referee
         env:
           PATHS: ${{ inputs.paths }}   # via env, never interpolated into the shell line
-        run: scripts/referee.sh $PATHS   # unquoted on purpose: space-separated paths
+        run: bash scripts/referee.sh $PATHS   # bash: like the Makefile, no exec-bit dependency; unquoted on purpose: space-separated paths
       - name: summary
         if: always()
         run: |

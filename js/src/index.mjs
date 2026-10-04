@@ -4,8 +4,10 @@
  * into WGSL kernels + a safetensors weight file).
  *
  * API status: 0.0.x — UNSTABLE, tracks the export format of the Python
- * side's experiments. The roadmap (in-tab tracing of arbitrary Keras
- * models via Pyodide) will grow here; today this is the runner half.
+ * side. This module is the RUNNER half, kept dependency-free so it can be
+ * inlined as a single blob. The TRACER half — real Keras under Pyodide
+ * tracing models live in the tab — is `keras-tinygrad/trace`
+ * (./trace/client.mjs), which needs real URLs for its worker and assets.
  */
 
 /** Import an exported runner module from its source text or bytes,
